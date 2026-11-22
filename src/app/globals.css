@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Official Brand Color Tokens [UI_UX_RULES.md Section 3] */
+  --color-primary-teal: #006B60;
+  --color-accent-coral: #FF8964;
+  --color-warm-cream: #FFF8F5;
+  --color-soft-peach: #FCE8E1;
+  --color-mint: #DDF3EE;
+  --color-pure-white: #FFFFFF;
+  --color-text-primary: #191B24;
+  --color-text-secondary: #66666B;
+  --color-text-muted: #929292;
+
+  /* Semantic Feedback Colors */
+  --color-success: #00875A;
+  --color-warning: #FFAB00;
+  --color-error: #DE350B;
+
+  /* Border Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+
+  /* Soft Diffuse Box Shadows */
+  --shadow-subtle: 0 2px 8px rgba(0, 0, 0, 0.03);
+  --shadow-card: 0 4px 20px rgba(0, 0, 0, 0.04);
+  --shadow-elevated: 0 12px 32px rgba(0, 0, 0, 0.06);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-soft-peach);
+  }
+
+  html,
+  body {
+    background-color: var(--color-warm-cream);
+    color: var(--color-text-primary);
+    font-family: var(--font-plus-jakarta), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Prevent automatic mobile safari input zoom */
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  /* Accessible focus indicators [UI_UX_RULES.md Section 7] */
+  :focus-visible {
+    outline: 2px solid var(--color-primary-teal);
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  /* Fluid responsive typography utilities */
+  .text-hero {
+    font-size: clamp(2.25rem, 5vw + 1rem, 3.75rem);
+    line-height: 1.15;
+    font-weight: 800;
+  }
+
+  .text-section-heading {
+    font-size: clamp(1.5rem, 3vw + 0.75rem, 2.5rem);
+    line-height: 1.2;
+    font-weight: 700;
+  }
+
+  .text-card-heading {
+    font-size: clamp(1.125rem, 1.5vw + 0.5rem, 1.25rem);
+    line-height: 1.3;
+    font-weight: 700;
+  }
+
+  /* Minimum 44x44px touch target utility */
+  .touch-target {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Safe area inset utilities for mobile navigation */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 16px);
+  }
+
+  .pt-safe {
+    padding-top: env(safe-area-inset-top, 16px);
+  }
+
+  /* Hardware-accelerated typewriter cursor animation */
+  .animate-cursor-blink {
+    animation: cursorBlink 0.8s ease-in-out infinite;
+  }
+}
+
+@keyframes cursorBlink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-cursor-blink {
+    animation: none !important;
+    opacity: 0 !important;
+  }
+}

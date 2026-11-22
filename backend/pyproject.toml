@@ -1,0 +1,40 @@
+[project]
+name = "single-instructor-lms-backend"
+version = "2.0.0"
+description = "High-security proprietary backend application engine for expert single-instructor LMS"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi==0.141.1",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.15.0",
+    "sqlalchemy==2.0.50",
+    "alembic==1.20.1",
+    "psycopg==3.3.3",
+    "uvicorn==0.52.3",
+    "argon2-cffi==25.1.0",
+    "pyjwt==2.13.0",
+    "cryptography==49.0.0",
+    "reportlab==5.0.1",
+    "certifi>=2024.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "anyio==4.14.0",
+    "httpx>=0.28.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "asyncio: mark test as asyncio",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
