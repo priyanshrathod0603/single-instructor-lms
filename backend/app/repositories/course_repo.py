@@ -61,14 +61,22 @@ class CourseRepository:
         headline: Optional[str] = None,
         description: Optional[str] = None,
         thumbnail_url: Optional[str] = None,
+        thumbnail_media_id: Optional[uuid.UUID] = None,
+        category: str = "General",
+        difficulty_level: str = "ALL_LEVELS",
+        language: str = "English",
+        learning_outcomes: Optional[List[str]] = None,
+        requirements: Optional[List[str]] = None,
         price_inr: int = 0,
+        compare_at_price_inr: Optional[int] = None,
+        currency: str = "INR",
         is_free: bool = False,
         tags: Optional[List[str]] = None,
         created_by: Optional[uuid.UUID] = None,
     ) -> Tuple[Course, CourseRevision]:
         """Create top-level course container and initial Draft Revision 1 atomically."""
         if not slug:
-            base_slug = slugify(title)
+            base_slug = slugify(title) or f"course-{uuid.uuid4().hex[:8]}"
             slug = base_slug
             counter = 1
             while self.get_by_slug(session, slug) is not None:
@@ -88,18 +96,28 @@ class CourseRepository:
             headline=headline,
             description=description,
             thumbnail_url=thumbnail_url,
+            thumbnail_media_id=thumbnail_media_id,
+            category=category,
+            difficulty_level=difficulty_level,
+            language=language,
+            learning_outcomes=learning_outcomes or [],
+            requirements=requirements or [],
             price_inr=price_inr,
+            compare_at_price_inr=compare_at_price_inr,
+            currency=currency,
             is_free=is_free,
             status=COURSE_STATUS_DRAFT,
         )
         session.add(course)
         session.flush()
 
-        # Add initial Course Tags
+        # Add initial Course Tags (preserve order, deduplicated lowercase)
         if tags:
-            for tag_str in set(tags):
+            seen_tags: set[str] = set()
+            for tag_str in tags:
                 cleaned_tag = tag_str.strip().lower()
-                if cleaned_tag:
+                if cleaned_tag and cleaned_tag not in seen_tags:
+                    seen_tags.add(cleaned_tag)
                     session.add(CourseTag(course_id=course.id, tag=cleaned_tag))
 
         # Spawn Initial Revision 1 (DRAFT)
@@ -160,13 +178,17 @@ class CourseRepository:
         status: Optional[str] = None,
         search: Optional[str] = None,
         tag: Optional[str] = None,
+        category: Optional[str] = None,
+        difficulty_level: Optional[str] = None,
+        language: Optional[str] = None,
         page: int = 1,
         per_page: int = 20,
     ) -> Tuple[List[Course], int]:
-        """List paginated course entities with optional status, search, and tag filters."""
+        """List paginated course entities with optional metadata filters."""
         query = select(Course).options(
             selectinload(Course.tags),
             selectinload(Course.live_revision),
+            selectinload(Course.revisions),
         )
 
         if status:
@@ -178,8 +200,15 @@ class CourseRepository:
                     func.lower(Course.title).like(search_term),
                     func.lower(Course.headline).like(search_term),
                     func.lower(Course.slug).like(search_term),
+                    func.lower(Course.category).like(search_term),
                 )
             )
+        if category:
+            query = query.where(func.lower(Course.category) == category.strip().lower())
+        if difficulty_level:
+            query = query.where(Course.difficulty_level == difficulty_level.strip().upper())
+        if language:
+            query = query.where(func.lower(Course.language) == language.strip().lower())
         if tag:
             query = query.join(Course.tags).where(CourseTag.tag == tag.strip().lower())
 
@@ -194,15 +223,26 @@ class CourseRepository:
         items = list(session.scalars(query).all())
         return items, total
 
+    def list_distinct_categories(self, session: Session) -> List[str]:
+        """Return distinct non-empty categories currently persisted across courses."""
+        stmt = select(Course.category).distinct()
+        return [cat for cat in session.scalars(stmt).all() if cat]
+
     def update_course(
         self,
         session: Session,
         course: Course,
+        update_fields: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Course:
-        """Update top-level course metadata and replace tags if provided."""
-        if "slug" in kwargs and kwargs["slug"] is not None:
-            new_slug = kwargs["slug"].strip().lower()
+        """Update top-level course metadata, allowing explicit clearing via update_fields."""
+        if update_fields is not None:
+            payload = dict(update_fields)
+        else:
+            payload = {k: v for k, v in kwargs.items() if v is not None}
+
+        if "slug" in payload and payload["slug"] is not None:
+            new_slug = str(payload["slug"]).strip().lower()
             if new_slug != course.slug:
                 existing = self.get_by_slug(session, new_slug)
                 if existing and existing.id != course.id:
@@ -213,16 +253,36 @@ class CourseRepository:
                     )
                 course.slug = new_slug
 
-        for field in ("title", "headline", "description", "thumbnail_url", "price_inr", "is_free"):
-            if field in kwargs and kwargs[field] is not None:
-                setattr(course, field, kwargs[field])
+        mutable_fields = (
+            "title",
+            "headline",
+            "description",
+            "thumbnail_url",
+            "thumbnail_media_id",
+            "category",
+            "difficulty_level",
+            "language",
+            "learning_outcomes",
+            "requirements",
+            "price_inr",
+            "compare_at_price_inr",
+            "currency",
+            "is_free",
+        )
+        for field in mutable_fields:
+            if field in payload:
+                val = payload[field]
+                if field in ("learning_outcomes", "requirements") and val is None:
+                    val = []
+                setattr(course, field, val)
 
-        if "tags" in kwargs and kwargs["tags"] is not None:
-            # Replace tags
+        if "tags" in payload and payload["tags"] is not None:
             session.query(CourseTag).filter(CourseTag.course_id == course.id).delete()
-            for t in set(kwargs["tags"]):
-                clean_t = t.strip().lower()
-                if clean_t:
+            seen_tags: set[str] = set()
+            for t in payload["tags"]:
+                clean_t = str(t).strip().lower()
+                if clean_t and clean_t not in seen_tags:
+                    seen_tags.add(clean_t)
                     session.add(CourseTag(course_id=course.id, tag=clean_t))
 
         course.updated_at = utc_now()

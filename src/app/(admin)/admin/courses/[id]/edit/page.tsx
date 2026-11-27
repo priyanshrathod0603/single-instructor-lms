@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, use } from "react";
+import React, { Suspense, useState, use, useEffect } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -11,31 +12,28 @@ import {
   UploadCloud,
   ExternalLink,
   Loader2,
-  Check,
   AlertCircle,
   GitFork,
   Plus,
 } from "lucide-react";
 import { coursesApi } from "@/lib/api/courses";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/Input";
-import { Textarea } from "@/components/ui/Textarea";
 import { Badge } from "@/components/ui/Badge";
 import { CurriculumBuilder } from "@/components/admin/CurriculumBuilder";
 import { PublishChecklistModal } from "@/components/admin/PublishChecklistModal";
+import { CourseMetadataForm } from "@/components/admin/course-form";
 
-export default function CourseEditorPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const resolvedParams = use(params);
-  const courseId = resolvedParams.id;
+function CourseEditorContent({ courseId }: { courseId: string }) {
   const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
+  const requestedTab = searchParams.get("tab") === "metadata" ? "metadata" : "curriculum";
 
-  const [activeTab, setActiveTab] = useState<"curriculum" | "metadata">("curriculum");
+  const [activeTab, setActiveTab] = useState<"curriculum" | "metadata">(requestedTab);
   const [isChecklistOpen, setIsChecklistOpen] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    setActiveTab(requestedTab);
+  }, [requestedTab]);
 
   // 1. Fetch Course Detail
   const { data: course, isLoading: courseLoading } = useQuery({
@@ -43,8 +41,12 @@ export default function CourseEditorPage({
     queryFn: () => coursesApi.getCourseDetail(courseId),
   });
 
-  // 2. Fetch Revision Tree
-  const targetRevId = course?.live_revision_id || undefined;
+  // 2. Fetch Revision Tree (prioritize active draft revision, then latest or live)
+  const targetRevId =
+    course?.draft_revision_id ||
+    course?.latest_revision_id ||
+    course?.live_revision_id ||
+    undefined;
   const { data: revision, isLoading: revisionLoading } = useQuery({
     queryKey: ["course-revision", courseId, targetRevId],
     queryFn: async () => {
@@ -54,49 +56,6 @@ export default function CourseEditorPage({
       return null;
     },
     enabled: !!courseId && !!targetRevId,
-  });
-
-  // Metadata form state
-  const [title, setTitle] = useState("");
-  const [headline, setHeadline] = useState("");
-  const [description, setDescription] = useState("");
-  const [priceInRupees, setPriceInRupees] = useState("");
-  const [isFree, setIsFree] = useState(false);
-  const [tagsInput, setTagsInput] = useState("");
-
-  React.useEffect(() => {
-    if (course) {
-      setTitle(course.title);
-      setHeadline(course.headline || "");
-      setDescription(course.description || "");
-      setPriceInRupees(String(course.price_inr / 100));
-      setIsFree(course.is_free || false);
-      setTagsInput(course.tags?.join(", ") || "");
-    }
-  }, [course]);
-
-  const updateMetadataMutation = useMutation({
-    mutationFn: () => {
-      const tags = tagsInput
-        .split(",")
-        .map((t) => t.trim())
-        .filter(Boolean);
-      const pricePaise = isFree ? 0 : Math.round(parseFloat(priceInRupees || "0") * 100);
-
-      return coursesApi.updateCourse(courseId, {
-        title,
-        headline,
-        description,
-        price_inr: pricePaise,
-        is_free: isFree,
-        tags,
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["course", courseId] });
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
-    },
   });
 
   const forkDraftMutation = useMutation({
@@ -232,92 +191,17 @@ export default function CourseEditorPage({
 
       {/* Tab 2: Metadata & Pricing Settings */}
       {activeTab === "metadata" && (
-        <div className="rounded-[16px] border border-slate-200 bg-white p-6 sm:p-8 shadow-sm max-w-3xl space-y-6">
-          {saveSuccess && (
-            <div className="flex items-center gap-2 rounded-lg bg-teal-50 p-3 text-sm text-teal-800 border border-teal-200">
-              <Check className="h-4 w-4 text-teal-600" />
-              <span>Course metadata saved successfully!</span>
-            </div>
-          )}
-
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              updateMetadataMutation.mutate();
+        <div className="max-w-4xl">
+          <CourseMetadataForm
+            mode="edit"
+            courseId={courseId}
+            initialCourse={course}
+            onSaved={(updatedCourse) => {
+              queryClient.setQueryData(["course", courseId], updatedCourse);
+              queryClient.invalidateQueries({ queryKey: ["manage-courses"] });
+              queryClient.invalidateQueries({ queryKey: ["courses"] });
             }}
-            className="space-y-4"
-          >
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
-                Title
-              </label>
-              <Input value={title} onChange={(e) => setTitle(e.target.value)} required />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
-                Headline
-              </label>
-              <Input value={headline} onChange={(e) => setHeadline(e.target.value)} />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
-                Description
-              </label>
-              <Textarea
-                rows={5}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
-                  Price (INR ₹)
-                </label>
-                <Input
-                  type="number"
-                  disabled={isFree}
-                  value={priceInRupees}
-                  onChange={(e) => setPriceInRupees(e.target.value)}
-                />
-              </div>
-
-              <div className="flex items-center gap-3 pt-6">
-                <input
-                  type="checkbox"
-                  id="metadata-is-free"
-                  checked={isFree}
-                  onChange={(e) => setIsFree(e.target.checked)}
-                  className="h-4 w-4 rounded border-slate-300 text-primary-teal focus:ring-primary-teal"
-                />
-                <label htmlFor="metadata-is-free" className="text-sm font-semibold text-slate-800">
-                  Free Course
-                </label>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
-                Tags
-              </label>
-              <Input value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} />
-            </div>
-
-            <div className="pt-4 border-t border-slate-100 flex justify-end">
-              <Button
-                type="submit"
-                variant="primary"
-                size="default"
-                isLoading={updateMetadataMutation.isPending}
-              >
-                <Check className="h-4 w-4 mr-2" />
-                Save Settings
-              </Button>
-            </div>
-          </form>
+          />
         </div>
       )}
 
@@ -331,5 +215,24 @@ export default function CourseEditorPage({
         />
       )}
     </div>
+  );
+}
+
+export default function CourseEditorPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const resolvedParams = use(params);
+  return (
+    <Suspense
+      fallback={
+        <div className="flex h-96 items-center justify-center">
+          <Loader2 className="h-8 w-8 animate-spin text-primary-teal" />
+        </div>
+      }
+    >
+      <CourseEditorContent courseId={resolvedParams.id} />
+    </Suspense>
   );
 }

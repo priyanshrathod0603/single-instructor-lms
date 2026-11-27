@@ -12,8 +12,10 @@ import {
   Loader2,
   CheckCircle2,
   ArrowLeft,
+  RefreshCw,
 } from "lucide-react";
 import { mediaApi } from "@/lib/api/media";
+import { getApiBaseUrl } from "@/lib/api/client";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { SUPPORTED_VIDEO_MIME_TYPES } from "@/types/media";
@@ -26,13 +28,27 @@ export default function AdminMediaPage() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const { data: mediaData, isLoading } = useQuery({
+  const {
+    data: mediaData,
+    isLoading,
+    isError,
+    error,
+    refetch,
+    isFetching,
+  } = useQuery({
     queryKey: ["admin-media-library", mimeFilter],
     queryFn: () =>
       mediaApi.listMediaAssets({
         per_page: 50,
         mime_type: mimeFilter || undefined,
       }),
+    refetchInterval: (query) => {
+      const items = query.state.data?.items || [];
+      const hasPending = items.some(
+        (asset) => asset.status === "UPLOADING" || asset.status === "PROCESSING"
+      );
+      return hasPending ? 3000 : false;
+    },
   });
 
   const displayedItems = (mediaData?.items || []).filter((asset) => {
@@ -85,8 +101,18 @@ export default function AdminMediaPage() {
         file_size_bytes: uploadFile.size,
       });
 
-      // 2. Direct binary PUT
-      const putRes = await fetch(intent.presigned_url, {
+      // 2. Direct binary PUT (resolving local dev backend URL if needed)
+      let uploadUrl = intent.presigned_url;
+      if (uploadUrl.startsWith("/")) {
+        uploadUrl = `${getApiBaseUrl()}${uploadUrl}`;
+      } else if (uploadUrl.includes("localhost:8000") && typeof window !== "undefined") {
+        const apiBase = getApiBaseUrl();
+        if (!apiBase.includes("localhost:8000")) {
+          uploadUrl = uploadUrl.replace("http://localhost:8000", apiBase);
+        }
+      }
+
+      const putRes = await fetch(uploadUrl, {
         method: "PUT",
         headers: {
           ...(intent.headers || {}),
@@ -241,7 +267,30 @@ export default function AdminMediaPage() {
 
       {/* Asset Grid */}
       <div className="rounded-[16px] border border-slate-200 bg-white shadow-sm p-6">
-        {isLoading ? (
+        {isError ? (
+          <div className="p-8 text-center space-y-4">
+            <div className="p-3 rounded-full bg-rose-100 text-rose-600 w-fit mx-auto">
+              <AlertCircle className="h-6 w-6" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-slate-800">
+                Failed to load media assets
+              </p>
+              <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+                {error instanceof Error ? error.message : "Unable to reach media storage API."}
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetch()}
+              className="text-xs"
+            >
+              <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+              Retry Connection
+            </Button>
+          </div>
+        ) : isLoading ? (
           <div className="flex h-64 items-center justify-center">
             <Loader2 className="h-8 w-8 animate-spin text-primary-teal" />
           </div>
@@ -286,9 +335,18 @@ export default function AdminMediaPage() {
                   </div>
 
                   <div className="mt-4 flex items-center justify-between pt-3 border-t border-slate-100">
-                    <Badge variant={asset.status === "READY" ? "success" : "outline"}>
-                      {asset.status}
-                    </Badge>
+                    {asset.status === "READY" ? (
+                      <Badge variant="success">Ready</Badge>
+                    ) : asset.status === "PROCESSING" ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                        <Loader2 className="h-3 w-3 animate-spin text-amber-600" />
+                        Processing...
+                      </span>
+                    ) : asset.status === "FAILED" ? (
+                      <Badge variant="error">Failed</Badge>
+                    ) : (
+                      <Badge variant="outline">{asset.status}</Badge>
+                    )}
                     <button
                       type="button"
                       onClick={() => {

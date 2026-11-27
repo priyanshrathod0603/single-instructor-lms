@@ -110,6 +110,16 @@ class CourseGovernanceService:
         stats = self._compute_curriculum_stats(db, course)
         tags = [t.tag for t in course.tags] if course.tags else []
 
+        draft_rev_id: Optional[uuid.UUID] = None
+        latest_rev_id: Optional[uuid.UUID] = None
+        if course.revisions:
+            for rev in course.revisions:
+                if rev.status == "DRAFT":
+                    draft_rev_id = rev.id
+                    break
+            latest = max(course.revisions, key=lambda r: r.revision_no)
+            latest_rev_id = latest.id
+
         return CourseGovernanceItemResponse(
             id=course.id,
             slug=course.slug,
@@ -117,11 +127,19 @@ class CourseGovernanceService:
             headline=course.headline,
             description=course.description,
             thumbnail_url=course.thumbnail_url,
+            category=course.category,
+            difficulty_level=course.difficulty_level,
+            language=course.language,
             status=course.status,
             price_inr=course.price_inr,
+            compare_at_price_inr=course.compare_at_price_inr,
+            currency=course.currency,
+            discount_percentage=course.discount_percentage,
             is_free=course.is_free,
             tags=tags,
             live_revision_id=course.live_revision_id,
+            draft_revision_id=draft_rev_id,
+            latest_revision_id=latest_rev_id,
             total_sections=stats["total_sections"],
             total_lessons=stats["total_lessons"],
             total_duration_seconds=stats["total_duration_seconds"],

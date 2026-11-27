@@ -550,3 +550,20 @@ def test_grade_and_override_workflow_endpoints(
     assert check_resp.status_code == 200
     assert check_resp.json()["final_score"] == 95.0
     assert len(check_resp.json()["grade_overrides"]) == 1
+
+    # 6. Student can list their own submissions without requiring assignment:view_all
+    own_resp = client.get(
+        f"/api/v1/assignments/{assignment_id}/my-submissions",
+        headers=auth_headers(student_user),
+    )
+    assert own_resp.status_code == 200
+    own_data = own_resp.json()
+    assert own_data["total"] == 1
+    assert own_data["items"][0]["id"] == submission_id
+
+    # Staff without assignment:submit cannot call student-only my-submissions
+    staff_own_resp = client.get(
+        f"/api/v1/assignments/{assignment_id}/my-submissions",
+        headers=auth_headers(staff_user),
+    )
+    assert staff_own_resp.status_code == 403

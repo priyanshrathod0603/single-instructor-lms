@@ -242,6 +242,29 @@ def list_assignment_submissions_endpoint(
 
 
 @router.get(
+    "/assignments/{id}/my-submissions",
+    response_model=SubmissionListResponse,
+    summary="List current student's own submissions for an assignment",
+)
+def list_my_assignment_submissions_endpoint(
+    id: uuid.UUID,
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permissions(ASSIGNMENT_SUBMIT)),
+    service: AssignmentService = Depends(get_assignment_service),
+) -> SubmissionListResponse:
+    """List the authenticated student's own submissions for an assignment."""
+    return service.list_own_submissions(
+        session=db,
+        student_id=current_user.id,
+        assignment_id=id,
+        page=page,
+        size=size,
+    )
+
+
+@router.get(
     "/submissions/{id}",
     response_model=SubmissionResponse,
     summary="View submission details, rubric scores, and grade overrides",

@@ -29,8 +29,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [hasCompleted, setHasCompleted] = useState(false);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
   const lastHeartbeatRef = useRef<number>(0);
   const completedSentRef = useRef<boolean>(false);
+  const hlsInstanceRef = useRef<any>(null);
 
   // 1. Authoritative signed playback token
   const {
@@ -50,6 +52,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     staleTime: 60 * 60 * 1000, // 1 hour token cache
     retry: 1,
   });
+
+  // Resolve playable URL: route through origin proxy if stream_url targets mock CDN
+  const streamUrl =
+    tokenData?.stream_url && tokenData.stream_url.includes("stream.instructor.com")
+      ? mediaApi.getProtectedHlsStreamUrl(mediaId, tokenData.playback_token)
+      : tokenData?.stream_url || "";
 
   // Heartbeat sender
   const sendHeartbeat = useCallback(
@@ -93,13 +101,78 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   };
 
+  // Browser-aware HLS playback engine (Safari native vs HLS.js vs fallback)
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !streamUrl) return;
+
+    setPlaybackError(null);
+
+    // Destroy prior HLS instance on URL transition
+    if (hlsInstanceRef.current) {
+      hlsInstanceRef.current.destroy();
+      hlsInstanceRef.current = null;
+    }
+
+    // 1. Native HLS support (Safari / iOS WebKit)
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = streamUrl;
+    } else if (
+      typeof window !== "undefined" &&
+      (window as any).Hls &&
+      (window as any).Hls.isSupported()
+    ) {
+      // 2. HLS.js engine (Chrome, Firefox, Edge, Android)
+      const HlsConstructor = (window as any).Hls;
+      const hls = new HlsConstructor({
+        enableWorker: true,
+        lowLatencyMode: true,
+      });
+      hlsInstanceRef.current = hls;
+
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+
+      hls.on(HlsConstructor.Events.ERROR, (_event: any, data: any) => {
+        if (data.fatal) {
+          switch (data.type) {
+            case HlsConstructor.ErrorTypes.NETWORK_ERROR:
+              console.warn("HLS network error, recovering...");
+              hls.startLoad();
+              break;
+            case HlsConstructor.ErrorTypes.MEDIA_ERROR:
+              console.warn("HLS media error, recovering...");
+              hls.recoverMediaError();
+              break;
+            default:
+              console.error("Fatal HLS playback error:", data);
+              hls.destroy();
+              hlsInstanceRef.current = null;
+              setPlaybackError("Video stream error. Please click retry.");
+              break;
+          }
+        }
+      });
+    } else {
+      // 3. Fallback direct assignment
+      video.src = streamUrl;
+    }
+
+    return () => {
+      if (hlsInstanceRef.current) {
+        hlsInstanceRef.current.destroy();
+        hlsInstanceRef.current = null;
+      }
+    };
+  }, [streamUrl]);
+
   // Restore initial watch position
   useEffect(() => {
     const video = videoRef.current;
     if (video && initialWatchSeconds > 0) {
       video.currentTime = initialWatchSeconds;
     }
-  }, [initialWatchSeconds, tokenData?.stream_url]);
+  }, [initialWatchSeconds, streamUrl]);
 
   if (isTokenLoading) {
     return (
@@ -115,17 +188,21 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     );
   }
 
-  if (isTokenError || !tokenData) {
+  if (isTokenError || !tokenData || playbackError) {
     return (
       <div className="aspect-video w-full rounded-[12px] bg-slate-900 p-6 flex flex-col items-center justify-center text-center">
         <div className="max-w-md space-y-3">
           <ErrorAlert
             title="Video Playback Unauthorized or Unavailable"
             message={
+              playbackError ||
               tokenError?.message ||
               "Could not authorize video playback token. Please verify your enrollment."
             }
-            onRetry={() => refetchToken()}
+            onRetry={() => {
+              setPlaybackError(null);
+              refetchToken();
+            }}
           />
         </div>
       </div>
@@ -136,12 +213,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     <div className="relative aspect-video w-full overflow-hidden rounded-[12px] bg-black shadow-lg group">
       <video
         ref={videoRef}
-        src={tokenData.stream_url}
         controls
         playsInline
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onTimeUpdate={handleTimeUpdate}
+        onError={() => setPlaybackError("Video playback error. Please try again.")}
         className="h-full w-full object-contain"
         preload="metadata"
       />

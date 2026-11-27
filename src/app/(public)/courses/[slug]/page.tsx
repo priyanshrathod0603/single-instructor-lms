@@ -22,6 +22,7 @@ import {
   Lock,
 } from "lucide-react";
 import { coursesApi } from "@/lib/api/courses";
+import { resolveApiAssetUrl } from "@/lib/api/client";
 import { CourseDetail, CurriculumSection, CurriculumLesson } from "@/types/course";
 import { useAuth } from "@/lib/hooks/useAuth";
 import { formatCurrency } from "@/lib/utils";
@@ -225,21 +226,24 @@ export default function CourseDetailPage() {
               <div className="sticky top-24 rounded-2xl border border-soft-peach bg-white p-6 shadow-elevated">
                 {/* 16:9 Thumbnail Header */}
                 <div className="relative aspect-video w-full overflow-hidden rounded-xl bg-slate-100 mb-6">
-                  {course.thumbnail_url && !imageError ? (
-                    <Image
-                      src={course.thumbnail_url}
-                      alt={course.title}
-                      fill
-                      sizes="400px"
-                      className="object-cover"
-                      onError={() => setImageError(true)}
-                      unoptimized={course.thumbnail_url.startsWith("http")}
-                    />
-                  ) : (
-                    <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-primary-teal/15 via-accent-mint/30 to-soft-peach/40">
-                      <BookOpen className="h-10 w-10 text-primary-teal" />
-                    </div>
-                  )}
+                  {(() => {
+                    const thumbnailSrc = resolveApiAssetUrl(course.thumbnail_url);
+                    return thumbnailSrc && !imageError ? (
+                      <Image
+                        src={thumbnailSrc}
+                        alt={course.title}
+                        fill
+                        sizes="400px"
+                        className="object-cover"
+                        onError={() => setImageError(true)}
+                        unoptimized={thumbnailSrc.startsWith("http") || thumbnailSrc.includes("/api/v1/media/public/")}
+                      />
+                    ) : (
+                      <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-primary-teal/15 via-accent-mint/30 to-soft-peach/40">
+                        <BookOpen className="h-10 w-10 text-primary-teal" />
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* Price Display */}

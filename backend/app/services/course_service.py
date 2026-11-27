@@ -35,6 +35,10 @@ from app.models.course import (
     COURSE_STATUS_ARCHIVED,
     COURSE_STATUS_DRAFT,
     COURSE_STATUS_PUBLISHED,
+    DEFAULT_COURSE_CATEGORIES,
+    DEFAULT_COURSE_LANGUAGES,
+    DEFAULT_CURRENCY_INR,
+    DIFFICULTY_LEVEL_LABELS,
     REVISION_STATUS_ARCHIVED,
     REVISION_STATUS_DRAFT,
     REVISION_STATUS_PUBLISHED,
@@ -46,12 +50,17 @@ from app.models.curriculum import (
     CurriculumSection,
     LessonResource,
 )
+from app.models.media import MEDIA_STATUS_READY, MediaAsset
 from app.repositories.course_repo import CourseRepository
 from app.schemas.course import (
+    SLUG_REGEX,
     CourseCreateRequest,
     CourseDetailResponse,
     CourseListResponse,
+    CourseMetadataOptionItem,
+    CourseMetadataOptionsResponse,
     CourseRevisionResponse,
+    CourseSlugCheckResponse,
     CourseSummaryResponse,
     CourseUpdateRequest,
     CurriculumLessonResponse,
@@ -84,6 +93,111 @@ class CourseService:
         self.repo = repository or CourseRepository()
         self.audit_service = audit_service or AuditService()
 
+    def _resolve_thumbnail_media(
+        self,
+        session: Session,
+        thumbnail_media_id: Optional[uuid.UUID],
+        thumbnail_url: Optional[str],
+    ) -> Tuple[Optional[uuid.UUID], Optional[str]]:
+        """Verify linked thumbnail MediaAsset and derive canonical public image URL."""
+        if thumbnail_media_id is None:
+            return None, thumbnail_url
+
+        asset = session.get(MediaAsset, thumbnail_media_id)
+        if asset is None:
+            raise ResourceNotFoundException("MediaAsset", str(thumbnail_media_id))
+
+        if (
+            asset.status != MEDIA_STATUS_READY
+            or not asset.file_key.startswith("public-images/")
+            or asset.mime_type not in {"image/png", "image/jpeg", "image/webp"}
+        ):
+            raise ValidationException(
+                message="Course thumbnail must reference a verified ready public image asset.",
+                code="INVALID_THUMBNAIL_MEDIA",
+            )
+
+        return asset.id, f"/api/v1/media/public/{asset.id}"
+
+    @staticmethod
+    def _extract_revision_ids(course: Course) -> Tuple[Optional[uuid.UUID], Optional[uuid.UUID]]:
+        """Derive draft and latest revision UUIDs from loaded revisions cleanly."""
+        revisions = getattr(course, "revisions", None) or []
+        if not revisions:
+            return None, course.live_revision_id
+        draft_rev = next((rev for rev in revisions if rev.status == REVISION_STATUS_DRAFT), None)
+        latest_rev = max(revisions, key=lambda r: r.revision_no)
+        return (draft_rev.id if draft_rev else None), latest_rev.id
+
+    def _build_course_summary(
+        self,
+        course: Course,
+        *,
+        draft_revision_id: Optional[uuid.UUID] = None,
+        latest_revision_id: Optional[uuid.UUID] = None,
+    ) -> CourseSummaryResponse:
+        if draft_revision_id is None and latest_revision_id is None:
+            draft_revision_id, latest_revision_id = self._extract_revision_ids(course)
+        return CourseSummaryResponse(
+            id=course.id,
+            slug=course.slug,
+            title=course.title,
+            headline=course.headline,
+            thumbnail_url=course.thumbnail_url,
+            thumbnail_media_id=course.thumbnail_media_id,
+            category=course.category,
+            difficulty_level=course.difficulty_level,
+            language=course.language,
+            status=course.status,
+            price_inr=course.price_inr,
+            compare_at_price_inr=course.compare_at_price_inr,
+            currency=course.currency,
+            discount_percentage=course.discount_percentage,
+            is_free=course.is_free,
+            tags=[t.tag for t in course.tags],
+            live_revision_id=course.live_revision_id,
+            draft_revision_id=draft_revision_id,
+            latest_revision_id=latest_revision_id,
+            created_at=course.created_at,
+            updated_at=course.updated_at,
+        )
+
+    def _build_course_detail(
+        self,
+        course: Course,
+        curriculum: List[CurriculumSectionResponse],
+        *,
+        draft_revision_id: Optional[uuid.UUID] = None,
+        latest_revision_id: Optional[uuid.UUID] = None,
+    ) -> CourseDetailResponse:
+        return CourseDetailResponse(
+            id=course.id,
+            slug=course.slug,
+            title=course.title,
+            headline=course.headline,
+            description=course.description,
+            thumbnail_url=course.thumbnail_url,
+            thumbnail_media_id=course.thumbnail_media_id,
+            category=course.category,
+            difficulty_level=course.difficulty_level,
+            language=course.language,
+            learning_outcomes=list(course.learning_outcomes or []),
+            requirements=list(course.requirements or []),
+            status=course.status,
+            price_inr=course.price_inr,
+            compare_at_price_inr=course.compare_at_price_inr,
+            currency=course.currency,
+            discount_percentage=course.discount_percentage,
+            is_free=course.is_free,
+            tags=[t.tag for t in course.tags],
+            live_revision_id=course.live_revision_id,
+            draft_revision_id=draft_revision_id,
+            latest_revision_id=latest_revision_id,
+            created_at=course.created_at,
+            updated_at=course.updated_at,
+            curriculum=curriculum,
+        )
+
     # =========================================================================
     # Course Lifecycle Operations
     # =========================================================================
@@ -98,14 +212,28 @@ class CourseService:
         user_agent: Optional[str] = None,
     ) -> Tuple[Course, CourseRevision]:
         """Create new course container and initial Draft Revision 1 atomically."""
+        resolved_media_id, resolved_thumb_url = self._resolve_thumbnail_media(
+            session,
+            data.thumbnail_media_id,
+            data.thumbnail_url,
+        )
+
         course, initial_revision = self.repo.create_course(
             session,
             title=data.title,
             slug=data.slug,
             headline=data.headline,
             description=data.description,
-            thumbnail_url=data.thumbnail_url,
+            thumbnail_url=resolved_thumb_url,
+            thumbnail_media_id=resolved_media_id,
+            category=data.category,
+            difficulty_level=data.difficulty_level,
+            language=data.language,
+            learning_outcomes=data.learning_outcomes,
+            requirements=data.requirements,
             price_inr=data.price_inr,
+            compare_at_price_inr=data.compare_at_price_inr,
+            currency=data.currency,
             is_free=data.is_free,
             tags=data.tags,
             created_by=actor_id,
@@ -123,7 +251,12 @@ class CourseService:
                 "id": str(course.id),
                 "slug": course.slug,
                 "title": course.title,
+                "category": course.category,
+                "difficulty_level": course.difficulty_level,
+                "language": course.language,
                 "price_inr": course.price_inr,
+                "compare_at_price_inr": course.compare_at_price_inr,
+                "currency": course.currency,
                 "is_free": course.is_free,
                 "status": course.status,
             },
@@ -171,21 +304,24 @@ class CourseService:
         if target_revision:
             curriculum = self._format_revision_sections(target_revision)
 
-        return CourseDetailResponse(
-            id=course.id,
-            slug=course.slug,
-            title=course.title,
-            headline=course.headline,
-            description=course.description,
-            thumbnail_url=course.thumbnail_url,
-            status=course.status,
-            price_inr=course.price_inr,
-            is_free=course.is_free,
-            tags=[t.tag for t in course.tags],
-            live_revision_id=course.live_revision_id,
-            created_at=course.created_at,
-            updated_at=course.updated_at,
-            curriculum=curriculum,
+        draft_rev_id: Optional[uuid.UUID] = None
+        latest_rev_id: Optional[uuid.UUID] = None
+        if is_staff_view:
+            draft_rev = self.repo.get_draft_revision(session, course.id)
+            if draft_rev:
+                draft_rev_id = draft_rev.id
+            if target_revision:
+                latest_rev_id = target_revision.id
+            else:
+                latest_rev = self.repo.get_latest_revision(session, course.id)
+                if latest_rev:
+                    latest_rev_id = latest_rev.id
+
+        return self._build_course_detail(
+            course,
+            curriculum,
+            draft_revision_id=draft_rev_id,
+            latest_revision_id=latest_rev_id,
         )
 
     async def list_courses(
@@ -195,6 +331,9 @@ class CourseService:
         status: Optional[str] = None,
         search: Optional[str] = None,
         tag: Optional[str] = None,
+        category: Optional[str] = None,
+        difficulty_level: Optional[str] = None,
+        language: Optional[str] = None,
         page: int = 1,
         per_page: int = 20,
     ) -> CourseListResponse:
@@ -204,27 +343,14 @@ class CourseService:
             status=status,
             search=search,
             tag=tag,
+            category=category,
+            difficulty_level=difficulty_level,
+            language=language,
             page=page,
             per_page=per_page,
         )
 
-        summaries = [
-            CourseSummaryResponse(
-                id=c.id,
-                slug=c.slug,
-                title=c.title,
-                headline=c.headline,
-                thumbnail_url=c.thumbnail_url,
-                status=c.status,
-                price_inr=c.price_inr,
-                is_free=c.is_free,
-                tags=[t.tag for t in c.tags],
-                live_revision_id=c.live_revision_id,
-                created_at=c.created_at,
-                updated_at=c.updated_at,
-            )
-            for c in items
-        ]
+        summaries = [self._build_course_summary(c) for c in items]
 
         total_pages = (total + per_page - 1) // per_page if total > 0 else 0
         return CourseListResponse(
@@ -233,6 +359,50 @@ class CourseService:
             page=page,
             per_page=per_page,
             total_pages=total_pages,
+        )
+
+    async def check_slug_availability(
+        self,
+        session: Session,
+        slug: str,
+        *,
+        exclude_course_id: Optional[uuid.UUID] = None,
+    ) -> CourseSlugCheckResponse:
+        """Verify slug syntax and database uniqueness for course forms."""
+        normalized = slug.strip().lower()
+        if not normalized or not SLUG_REGEX.match(normalized):
+            return CourseSlugCheckResponse(
+                slug=normalized,
+                available=False,
+                reason="Slug must use lowercase letters, numbers, and hyphens only.",
+            )
+        existing = self.repo.get_by_slug(session, normalized)
+        if existing is not None and existing.id != exclude_course_id:
+            return CourseSlugCheckResponse(
+                slug=normalized,
+                available=False,
+                reason="This URL slug is already used by another course.",
+            )
+        return CourseSlugCheckResponse(slug=normalized, available=True, reason=None)
+
+    def get_metadata_options(self, session: Session) -> CourseMetadataOptionsResponse:
+        """Return canonical taxonomy options augmented with any existing custom categories."""
+        existing_cats = self.repo.list_distinct_categories(session)
+        merged_cats = list(DEFAULT_COURSE_CATEGORIES)
+        seen_lower = {c.lower() for c in merged_cats}
+        for cat in existing_cats:
+            if cat.lower() not in seen_lower:
+                seen_lower.add(cat.lower())
+                merged_cats.append(cat)
+
+        return CourseMetadataOptionsResponse(
+            categories=merged_cats,
+            difficulty_levels=[
+                CourseMetadataOptionItem(value=code, label=label)
+                for code, label in DIFFICULTY_LEVEL_LABELS.items()
+            ],
+            languages=list(DEFAULT_COURSE_LANGUAGES),
+            currencies=[DEFAULT_CURRENCY_INR],
         )
 
     async def update_course(
@@ -244,39 +414,149 @@ class CourseService:
         actor_id: Optional[uuid.UUID] = None,
         ip_address: Optional[str] = None,
         user_agent: Optional[str] = None,
-    ) -> CourseSummaryResponse:
-        """Update top-level course metadata and record audit event."""
+    ) -> CourseDetailResponse:
+        """Update top-level course metadata with explicit partial-update semantics and audit logging."""
         course = self.repo.get_by_id(session, course_id)
         if course is None:
             raise ResourceNotFoundException("Course", str(course_id))
+
+        fields_set = data.model_fields_set
+        update_payload: dict[str, Any] = {
+            field: getattr(data, field)
+            for field in fields_set
+        }
+
+        if "slug" in fields_set and data.slug is None:
+            raise ValidationException(
+                message="Course slug cannot be cleared or empty.",
+                code="INVALID_SLUG",
+            )
+        if "title" in fields_set and not data.title:
+            raise ValidationException(
+                message="Course title cannot be cleared or empty.",
+                code="INVALID_TITLE",
+            )
+        if "category" in fields_set and not data.category:
+            raise ValidationException(
+                message="Category cannot be empty.",
+                code="INVALID_CATEGORY",
+            )
+        if "difficulty_level" in fields_set and not data.difficulty_level:
+            raise ValidationException(
+                message="Difficulty level cannot be empty.",
+                code="INVALID_DIFFICULTY",
+            )
+        if "language" in fields_set and not data.language:
+            raise ValidationException(
+                message="Language cannot be empty.",
+                code="INVALID_LANGUAGE",
+            )
+
+        # Resolve linked thumbnail asset & explicit clearing semantics
+        if "thumbnail_media_id" in fields_set:
+            if data.thumbnail_media_id is None:
+                update_payload["thumbnail_media_id"] = None
+                if "thumbnail_url" not in fields_set:
+                    update_payload["thumbnail_url"] = None
+            else:
+                media_id, media_url = self._resolve_thumbnail_media(
+                    session,
+                    data.thumbnail_media_id,
+                    data.thumbnail_url,
+                )
+                update_payload["thumbnail_media_id"] = media_id
+                update_payload["thumbnail_url"] = media_url
+        elif "thumbnail_url" in fields_set:
+            if not data.thumbnail_url or not data.thumbnail_url.startswith("/api/v1/media/public/"):
+                update_payload["thumbnail_media_id"] = None
+
+        # Cross-field pricing invariant check against persisted course state
+        effective_is_free = (
+            update_payload["is_free"]
+            if "is_free" in update_payload
+            else course.is_free
+        )
+        if effective_is_free:
+            if "price_inr" in update_payload and update_payload["price_inr"] != 0:
+                raise ValidationException(
+                    message="Free courses must have price_inr equal to 0.",
+                    code="INVALID_FREE_PRICE",
+                )
+            if (
+                "compare_at_price_inr" in update_payload
+                and update_payload["compare_at_price_inr"] is not None
+            ):
+                raise ValidationException(
+                    message="Free courses cannot have a regular/compare-at price.",
+                    code="INVALID_FREE_PRICE",
+                )
+            update_payload["price_inr"] = 0
+            update_payload["compare_at_price_inr"] = None
+        else:
+            effective_price = (
+                update_payload["price_inr"]
+                if "price_inr" in update_payload
+                else course.price_inr
+            )
+            effective_compare = (
+                update_payload["compare_at_price_inr"]
+                if "compare_at_price_inr" in update_payload
+                else course.compare_at_price_inr
+            )
+            if effective_price is None or effective_price <= 0:
+                raise ValidationException(
+                    message="Paid courses must have a selling price greater than 0 INR.",
+                    code="INVALID_COURSE_PRICE",
+                )
+            if effective_compare is not None:
+                if effective_compare < effective_price:
+                    raise ValidationException(
+                        message="Discounted selling price cannot exceed regular price.",
+                        code="INVALID_DISCOUNT_PRICE",
+                    )
+                if effective_compare == effective_price:
+                    update_payload["compare_at_price_inr"] = None
 
         before_state = {
             "title": course.title,
             "slug": course.slug,
             "headline": course.headline,
+            "category": course.category,
+            "difficulty_level": course.difficulty_level,
+            "language": course.language,
+            "learning_outcomes": list(course.learning_outcomes or []),
+            "requirements": list(course.requirements or []),
+            "thumbnail_url": course.thumbnail_url,
+            "thumbnail_media_id": str(course.thumbnail_media_id) if course.thumbnail_media_id else None,
             "price_inr": course.price_inr,
+            "compare_at_price_inr": course.compare_at_price_inr,
+            "currency": course.currency,
             "is_free": course.is_free,
+            "tags": [t.tag for t in course.tags],
         }
 
         updated = self.repo.update_course(
             session,
             course,
-            title=data.title,
-            slug=data.slug,
-            headline=data.headline,
-            description=data.description,
-            thumbnail_url=data.thumbnail_url,
-            price_inr=data.price_inr,
-            is_free=data.is_free,
-            tags=data.tags,
+            update_fields=update_payload,
         )
 
         after_state = {
             "title": updated.title,
             "slug": updated.slug,
             "headline": updated.headline,
+            "category": updated.category,
+            "difficulty_level": updated.difficulty_level,
+            "language": updated.language,
+            "learning_outcomes": list(updated.learning_outcomes or []),
+            "requirements": list(updated.requirements or []),
+            "thumbnail_url": updated.thumbnail_url,
+            "thumbnail_media_id": str(updated.thumbnail_media_id) if updated.thumbnail_media_id else None,
             "price_inr": updated.price_inr,
+            "compare_at_price_inr": updated.compare_at_price_inr,
+            "currency": updated.currency,
             "is_free": updated.is_free,
+            "tags": [t.tag for t in updated.tags],
         }
 
         await self.audit_service.record_event(
@@ -292,20 +572,7 @@ class CourseService:
             user_agent=user_agent,
         )
 
-        return CourseSummaryResponse(
-            id=updated.id,
-            slug=updated.slug,
-            title=updated.title,
-            headline=updated.headline,
-            thumbnail_url=updated.thumbnail_url,
-            status=updated.status,
-            price_inr=updated.price_inr,
-            is_free=updated.is_free,
-            tags=[t.tag for t in updated.tags],
-            live_revision_id=updated.live_revision_id,
-            created_at=updated.created_at,
-            updated_at=updated.updated_at,
-        )
+        return await self.get_course_detail(session, str(updated.id), is_staff_view=True)
 
     async def archive_course(
         self,
@@ -321,6 +588,7 @@ class CourseService:
         if course is None:
             raise ResourceNotFoundException("Course", str(course_id))
 
+        prior_status = course.status
         archived = self.repo.archive_course(session, course)
 
         await self.audit_service.record_event(
@@ -330,26 +598,13 @@ class CourseService:
             resource_id=str(archived.id),
             actor_id=actor_id,
             actor_type="USER" if actor_id else "SYSTEM",
-            before_state={"status": course.status},
+            before_state={"status": prior_status},
             after_state={"status": archived.status},
             ip_address=ip_address,
             user_agent=user_agent,
         )
 
-        return CourseSummaryResponse(
-            id=archived.id,
-            slug=archived.slug,
-            title=archived.title,
-            headline=archived.headline,
-            thumbnail_url=archived.thumbnail_url,
-            status=archived.status,
-            price_inr=archived.price_inr,
-            is_free=archived.is_free,
-            tags=[t.tag for t in archived.tags],
-            live_revision_id=archived.live_revision_id,
-            created_at=archived.created_at,
-            updated_at=archived.updated_at,
-        )
+        return self._build_course_summary(archived)
 
     # =========================================================================
     # Revision Spawning & Management
@@ -682,7 +937,18 @@ class CourseService:
             "slug": course.slug,
             "headline": course.headline,
             "description": course.description,
+            "thumbnail_url": course.thumbnail_url,
+            "thumbnail_media_id": str(course.thumbnail_media_id) if course.thumbnail_media_id else None,
+            "category": course.category,
+            "difficulty_level": course.difficulty_level,
+            "language": course.language,
+            "learning_outcomes": list(course.learning_outcomes or []),
+            "requirements": list(course.requirements or []),
+            "tags": [t.tag for t in course.tags],
             "price_inr": course.price_inr,
+            "compare_at_price_inr": course.compare_at_price_inr,
+            "currency": course.currency,
+            "discount_percentage": course.discount_percentage,
             "is_free": course.is_free,
             "sections": [
                 {

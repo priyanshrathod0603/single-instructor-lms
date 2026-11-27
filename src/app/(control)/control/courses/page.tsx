@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   BookMarked,
@@ -23,9 +24,11 @@ import {
   Tag,
   Shield,
   HelpCircle,
+  ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import { controlApi } from "@/lib/api/control";
+import { coursesApi } from "@/lib/api/courses";
 import { CourseGovernanceItem } from "@/types/content";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -76,6 +79,15 @@ export default function CourseGovernancePage() {
   const [targetStatus, setTargetStatus] = useState<string>("PUBLISHED");
   const [statusReason, setStatusReason] = useState("");
   const [statusError, setStatusError] = useState<string | null>(null);
+
+  // Pre-flight publishing validation when target status is PUBLISHED
+  const isPublishTarget = targetStatus === "PUBLISHED" && !!statusCourse;
+  const { data: checklistData, isLoading: checklistLoading } = useQuery({
+    queryKey: ["control-publish-checklist", statusCourse?.id],
+    queryFn: () => coursesApi.getPublishChecklist(statusCourse!.id),
+    enabled: isPublishTarget,
+    staleTime: 5000,
+  });
 
   const currentSort = SORT_OPTIONS[sortIndex];
 
@@ -149,7 +161,11 @@ export default function CourseGovernancePage() {
       }
     },
     onError: (err: any) => {
-      const msg = err?.response?.data?.detail || err?.message || "Failed to update course status.";
+      let msg = err?.response?.data?.detail || err?.message || "Failed to update course status.";
+      const blockers = err?.details?.blockers || err?.response?.data?.error?.details?.blockers;
+      if (Array.isArray(blockers) && blockers.length > 0) {
+        msg = `Cannot publish: ${blockers.map((b: any) => b.message).join(" • ")}`;
+      }
       setStatusError(msg);
       toast.error(msg);
     },
@@ -527,7 +543,16 @@ export default function CourseGovernancePage() {
 
                     {/* Actions */}
                     <td className="py-3 px-4 text-right whitespace-nowrap">
-                      <div className="flex items-center justify-end gap-2">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <Link
+                          href={`/admin/courses/${course.id}/edit`}
+                          className="h-8 px-2.5 text-xs font-medium inline-flex items-center gap-1 rounded-lg border border-slate-200 text-slate-700 bg-white hover:bg-slate-50 hover:text-slate-900 transition-colors"
+                          title="Edit Course Curriculum & Media"
+                        >
+                          <BookOpen className="h-3.5 w-3.5 text-slate-500" />
+                          <span>Curriculum</span>
+                        </Link>
+
                         <Button
                           variant="ghost"
                           size="sm"
@@ -717,6 +742,15 @@ export default function CourseGovernancePage() {
               Close
             </Button>
             {inspectCourse && (
+              <Link
+                href={`/admin/courses/${inspectCourse.id}/edit`}
+                className="h-8 px-3 text-xs font-medium inline-flex items-center gap-1.5 rounded-lg border border-slate-200 text-slate-700 bg-white hover:bg-slate-50 transition-colors"
+              >
+                <BookOpen className="h-3.5 w-3.5 text-slate-500" />
+                <span>Edit Curriculum</span>
+              </Link>
+            )}
+            {inspectCourse && (
               <Button
                 variant="primary"
                 size="sm"
@@ -774,11 +808,48 @@ export default function CourseGovernancePage() {
               </div>
 
               {targetStatus === "PUBLISHED" && (
-                <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-start gap-2">
-                  <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
-                  <div>
-                    <strong>Publishing Note:</strong> A course must possess a valid, validated live revision snapshot before transitioning to PUBLISHED status.
-                  </div>
+                <div className="space-y-2">
+                  {checklistLoading ? (
+                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin text-primary-teal shrink-0" />
+                      <span>Validating pre-flight publishing requirements...</span>
+                    </div>
+                  ) : checklistData?.can_publish ? (
+                    <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-start gap-2">
+                      <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                      <div>
+                        <strong>Ready to Publish:</strong> All pre-flight checklist conditions passed for Revision {checklistData.revision_no}.
+                      </div>
+                    </div>
+                  ) : checklistData && !checklistData.can_publish ? (
+                    <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-2">
+                      <div className="flex items-start gap-2 font-semibold text-amber-800">
+                        <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                        <span>Pre-Flight Checklist Blockers ({checklistData.blockers.length}):</span>
+                      </div>
+                      <ul className="list-disc pl-5 space-y-1 text-amber-800">
+                        {checklistData.blockers.map((blocker, idx) => (
+                          <li key={idx}>{blocker.message}</li>
+                        ))}
+                      </ul>
+                      <div className="pt-1">
+                        <Link
+                          href={`/admin/courses/${statusCourse.id}/edit`}
+                          className="inline-flex items-center gap-1 font-semibold text-teal-700 hover:text-teal-900 hover:underline"
+                        >
+                          <BookOpen className="h-3.5 w-3.5" />
+                          <span>Open Curriculum Builder to Resolve Blockers &rarr;</span>
+                        </Link>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700 flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 text-slate-500 shrink-0 mt-0.5" />
+                      <div>
+                        <strong>Publishing Requirements:</strong> Course must have a title, headline, pricing, at least one section, and validated lessons with media before publishing.
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -819,7 +890,15 @@ export default function CourseGovernancePage() {
               variant="primary"
               size="sm"
               onClick={handleConfirmStatusChange}
-              disabled={statusMutation.isPending}
+              disabled={
+                statusMutation.isPending ||
+                (targetStatus === "PUBLISHED" && checklistData?.can_publish === false)
+              }
+              title={
+                targetStatus === "PUBLISHED" && checklistData?.can_publish === false
+                  ? "Resolve checklist blockers in Curriculum Builder before publishing"
+                  : undefined
+              }
               className="bg-primary-teal hover:bg-primary-teal/90 text-white flex items-center gap-1.5"
             >
               {statusMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}

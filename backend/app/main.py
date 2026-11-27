@@ -298,6 +298,15 @@ def create_app(settings: Optional[Settings] = None, **kwargs: Any) -> FastAPI:
 
     app.include_router(api_v1_router)
 
+    # Direct HLS streaming route matching CDN URL path structure
+    from app.api.v1.media import stream_hls_resource_endpoint
+    app.add_api_route(
+        "/hls/{id}/{file_path:path}",
+        stream_hls_resource_endpoint,
+        methods=["GET"],
+        include_in_schema=False,
+    )
+
     return app
 
 

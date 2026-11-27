@@ -19,7 +19,12 @@ from app.api.deps import get_db
 from app.core.security import create_access_token, hash_password
 from app.main import create_app
 from app.models.base import Base
-from app.models.course import Course, CourseRevision
+from app.models.course import (
+    COURSE_STATUS_PUBLISHED,
+    REVISION_STATUS_PUBLISHED,
+    Course,
+    CourseRevision,
+)
 from app.models.curriculum import LESSON_TYPE_VIDEO, CurriculumLesson, CurriculumSection
 from app.models.media import (
     MEDIA_STATUS_PROCESSING,
@@ -218,6 +223,11 @@ def test_video_playback_token_and_pdf_streaming(
         mime_type="video/mp4",
         file_size_bytes=50000000,
         status=MEDIA_STATUS_READY,
+        transcode_output={
+            "hls_master_url": "https://stream.instructor.com/media/lecture_video/hls/master.m3u8",
+            "resolutions": ["1080p"],
+            "duration_seconds": 120,
+        },
     )
     # 2. Create a PDF asset in READY state
     pdf = MediaAsset(
@@ -242,15 +252,22 @@ def test_video_playback_token_and_pdf_streaming(
         title="Streaming Test Course",
         slug="streaming-test-course",
         headline="Streaming test headline",
+        status=COURSE_STATUS_PUBLISHED,
         price_inr=0,
         is_free=True,
     )
     db_session.add(course)
     db_session.flush()
 
-    rev = CourseRevision(course_id=course.id, revision_no=1, title="Published Revision")
+    rev = CourseRevision(
+        course_id=course.id,
+        revision_no=1,
+        title="Published Revision",
+        status=REVISION_STATUS_PUBLISHED,
+    )
     db_session.add(rev)
     db_session.flush()
+    course.live_revision_id = rev.id
 
     sec = CurriculumSection(course_revision_id=rev.id, title="Section 1", sort_order=0)
     db_session.add(sec)
@@ -388,3 +405,67 @@ def test_chk05_media_readiness_publishing_checklist_integration(
     chk_data2 = chk_resp2.json()
     assert chk_data2["can_publish"] is True
     assert len(chk_data2["blockers"]) == 0
+
+
+def test_local_storage_upload_and_download_flow(
+    client: TestClient, db_session: Session, super_admin_user: User
+):
+    """Verifies end-to-end local dev storage upload pipeline: intent -> direct PUT -> confirm -> download."""
+    from tests.conftest import create_test_auth_headers
+    from app.core.storage import StorageClient
+
+    admin_token = create_test_auth_headers(super_admin_user, extra_claims={"roles": [ROLE_SUPER_ADMIN]})["Authorization"].split()[1]
+
+    # 1. Request upload intent
+    intent_resp = client.post(
+        "/api/v1/media/upload-intent",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "filename": "local_demo_doc.pdf",
+            "mime_type": "application/pdf",
+            "file_size_bytes": 1024,
+        },
+    )
+    assert intent_resp.status_code == 201
+    intent_data = intent_resp.json()
+    media_id = intent_data["media_id"]
+    presigned_url = intent_data["presigned_url"]
+    file_key = intent_data["file_key"]
+
+    assert "/api/v1/media/storage/upload/" in presigned_url
+
+    # Extract relative path from presigned_url
+    from urllib.parse import urlparse
+    parsed = urlparse(presigned_url)
+    upload_path = parsed.path
+    if parsed.query:
+        upload_path = f"{upload_path}?{parsed.query}"
+
+    # 2. Direct binary PUT
+    payload = b"%PDF-1.4 " + b"A" * (1024 - 9)
+    put_resp = client.put(
+        upload_path,
+        content=payload,
+        headers={"Content-Type": "application/pdf"},
+    )
+    assert put_resp.status_code == 200
+
+    # Verify StorageClient holds the bytes
+    storage = StorageClient()
+    assert storage.object_exists(file_key) is True
+    assert storage.get_object(file_key) == payload
+
+    # 3. Confirm upload
+    confirm_resp = client.post(
+        f"/api/v1/media/{media_id}/confirm",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"file_key": file_key},
+    )
+    assert confirm_resp.status_code == 200
+    confirm_data = confirm_resp.json()
+    assert confirm_data["status"] == MEDIA_STATUS_READY
+
+    # 4. Direct binary download via local download route
+    dl_resp = client.get(f"/api/v1/media/storage/download/{file_key}")
+    assert dl_resp.status_code == 200
+    assert dl_resp.content == payload

@@ -21,6 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -45,6 +46,7 @@ from app.models.base import (
 if TYPE_CHECKING:
     from app.models.curriculum import CurriculumSection
     from app.models.enrollment import Enrollment
+    from app.models.media import MediaAsset
     from app.models.payment import Order
     from app.models.user import User
 
@@ -58,6 +60,50 @@ VALID_COURSE_STATUSES = frozenset({
     COURSE_STATUS_PUBLISHED,
     COURSE_STATUS_ARCHIVED,
 })
+
+# Canonical Course Difficulty Constants
+DIFFICULTY_BEGINNER = "BEGINNER"
+DIFFICULTY_INTERMEDIATE = "INTERMEDIATE"
+DIFFICULTY_ADVANCED = "ADVANCED"
+DIFFICULTY_ALL_LEVELS = "ALL_LEVELS"
+
+VALID_DIFFICULTY_LEVELS = frozenset({
+    DIFFICULTY_BEGINNER,
+    DIFFICULTY_INTERMEDIATE,
+    DIFFICULTY_ADVANCED,
+    DIFFICULTY_ALL_LEVELS,
+})
+
+DIFFICULTY_LEVEL_LABELS: dict[str, str] = {
+    DIFFICULTY_BEGINNER: "Beginner",
+    DIFFICULTY_INTERMEDIATE: "Intermediate",
+    DIFFICULTY_ADVANCED: "Advanced",
+    DIFFICULTY_ALL_LEVELS: "All Levels",
+}
+
+DEFAULT_COURSE_CATEGORIES: tuple[str, ...] = (
+    "Web Development",
+    "Backend Engineering",
+    "System Design",
+    "Data Science & AI",
+    "Mobile Development",
+    "Cloud & DevOps",
+    "Cybersecurity",
+    "Programming Languages",
+    "Career & Interview Prep",
+    "General",
+)
+
+DEFAULT_COURSE_LANGUAGES: tuple[str, ...] = (
+    "English",
+    "Hindi",
+    "Hinglish",
+    "Spanish",
+    "French",
+    "German",
+)
+
+DEFAULT_CURRENCY_INR = "INR"
 
 # Canonical Revision Status Constants
 REVISION_STATUS_DRAFT = "DRAFT"
@@ -103,6 +149,54 @@ class Course(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
         doc="Public CDN URL to thumbnail image asset in object storage",
     )
+    thumbnail_media_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sa.Uuid(as_uuid=True),
+        ForeignKey(
+            "media_assets.id",
+            name="fk_courses_thumbnail_media_id_media_assets",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        doc="Optional reference to uploaded MediaAsset representing the course thumbnail",
+    )
+    category: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="General",
+        server_default=text("'General'"),
+        index=True,
+        doc="Primary instructional category for catalog discovery and filtering",
+    )
+    difficulty_level: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="ALL_LEVELS",
+        server_default=text("'ALL_LEVELS'"),
+        index=True,
+        doc="Target learner proficiency level: BEGINNER, INTERMEDIATE, ADVANCED, or ALL_LEVELS",
+    )
+    language: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="English",
+        server_default=text("'English'"),
+        index=True,
+        doc="Primary instruction language (e.g. English, Hindi, Hinglish)",
+    )
+    learning_outcomes: Mapped[List[str]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(astext_type=Text()), "postgresql"),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+        doc="Ordered list of structured learning outcomes ('What you will learn')",
+    )
+    requirements: Mapped[List[str]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(astext_type=Text()), "postgresql"),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+        doc="Ordered list of prerequisite knowledge or tools required before enrolling",
+    )
     live_revision_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         sa.Uuid(as_uuid=True),
         ForeignKey(
@@ -127,7 +221,19 @@ class Course(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=False,
         default=0,
         server_default=text("0"),
-        doc="Commercial price in minor currency units (paise, 1 INR = 100 paise)",
+        doc="Effective selling commercial price in minor currency units (paise, 1 INR = 100 paise)",
+    )
+    compare_at_price_inr: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+        doc="Optional regular/compare-at price in paise when a discounted selling price is active",
+    )
+    currency: Mapped[str] = mapped_column(
+        String(3),
+        nullable=False,
+        default="INR",
+        server_default=text("'INR'"),
+        doc="ISO 4217 3-letter currency code (currently INR)",
     )
     is_free: Mapped[bool] = mapped_column(
         Boolean,
@@ -170,11 +276,74 @@ class Course(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         foreign_keys="Enrollment.course_id",
         lazy="select",
     )
+    thumbnail_media: Mapped[Optional["MediaAsset"]] = relationship(
+        "MediaAsset",
+        foreign_keys=[thumbnail_media_id],
+        lazy="select",
+    )
+
+    __table_args__ = (
+        CheckConstraint("price_inr >= 0", name="price_non_negative"),
+        CheckConstraint(
+            "compare_at_price_inr IS NULL OR compare_at_price_inr > 0",
+            name="compare_at_price_positive",
+        ),
+        CheckConstraint(
+            "compare_at_price_inr IS NULL OR compare_at_price_inr >= price_inr",
+            name="compare_at_ge_price",
+        ),
+        CheckConstraint(
+            "NOT is_free OR (price_inr = 0 AND compare_at_price_inr IS NULL)",
+            name="free_zero_price",
+        ),
+        CheckConstraint(
+            "difficulty_level IN ('BEGINNER', 'INTERMEDIATE', 'ADVANCED', 'ALL_LEVELS')",
+            name="difficulty_level",
+        ),
+    )
+
+    @property
+    def discount_percentage(self) -> Optional[int]:
+        """Compute rounded discount percentage when compare_at_price_inr exceeds price_inr."""
+        if (
+            self.is_free
+            or self.compare_at_price_inr is None
+            or self.compare_at_price_inr <= 0
+            or self.price_inr >= self.compare_at_price_inr
+        ):
+            return None
+        pct = round(
+            ((self.compare_at_price_inr - self.price_inr) / self.compare_at_price_inr)
+            * 100
+        )
+        return pct if pct > 0 else None
 
     def __init__(self, **kwargs: Any) -> None:
-        """Instantiate course with normalized lowercase slug and default timestamps."""
+        """Instantiate course with normalized metadata defaults."""
         if "slug" in kwargs and kwargs["slug"]:
             kwargs["slug"] = str(kwargs["slug"]).strip().lower()
+        if "category" not in kwargs or not kwargs["category"]:
+            kwargs["category"] = "General"
+        else:
+            kwargs["category"] = str(kwargs["category"]).strip()
+        if "difficulty_level" not in kwargs or not kwargs["difficulty_level"]:
+            kwargs["difficulty_level"] = DIFFICULTY_ALL_LEVELS
+        if "language" not in kwargs or not kwargs["language"]:
+            kwargs["language"] = "English"
+        else:
+            kwargs["language"] = str(kwargs["language"]).strip()
+        if "learning_outcomes" not in kwargs or kwargs["learning_outcomes"] is None:
+            kwargs["learning_outcomes"] = []
+        else:
+            kwargs["learning_outcomes"] = list(kwargs["learning_outcomes"])
+        if "requirements" not in kwargs or kwargs["requirements"] is None:
+            kwargs["requirements"] = []
+        else:
+            kwargs["requirements"] = list(kwargs["requirements"])
+        if "currency" not in kwargs or not kwargs["currency"]:
+            kwargs["currency"] = DEFAULT_CURRENCY_INR
+        else:
+            kwargs["currency"] = str(kwargs["currency"]).strip().upper()
         if "price_inr" not in kwargs or kwargs["price_inr"] is None:
             kwargs["price_inr"] = 0
         if "is_free" not in kwargs or kwargs["is_free"] is None:

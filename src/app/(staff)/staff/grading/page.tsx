@@ -20,7 +20,7 @@ import { Badge } from "@/components/ui/Badge";
 
 export default function StaffGradingQueuePage() {
   const [selectedCourseId, setSelectedCourseId] = useState<string>("");
-  const [selectedAssignmentId, setSelectedAssignmentId] = useState<string>("");
+  const [selectedLessonId, setSelectedLessonId] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("SUBMITTED");
 
   // Fetch available courses
@@ -42,15 +42,29 @@ export default function StaffGradingQueuePage() {
       s.lessons.filter((l) => l.lesson_type === "ASSIGNMENT")
     ) || [];
 
+  // Resolve the CurriculumLesson ID to its linked Assignment ID before fetching submissions
+  const {
+    data: resolvedAssignment,
+    isLoading: assignmentLoading,
+    isError: assignmentMissing,
+  } = useQuery({
+    queryKey: ["lesson-assignment-staff", selectedLessonId],
+    queryFn: () => assignmentsApi.getLessonAssignment(selectedLessonId),
+    enabled: !!selectedLessonId,
+    retry: false,
+  });
+
+  const resolvedAssignmentId = resolvedAssignment?.id || "";
+
   // Fetch submissions for chosen assignment
   const { data: submissionsData, isLoading: submissionsLoading } = useQuery({
-    queryKey: ["assignment-submissions", selectedAssignmentId, statusFilter],
+    queryKey: ["assignment-submissions", resolvedAssignmentId, statusFilter],
     queryFn: () =>
-      assignmentsApi.listAssignmentSubmissions(selectedAssignmentId, {
+      assignmentsApi.listAssignmentSubmissions(resolvedAssignmentId, {
         status: statusFilter || undefined,
         size: 50,
       }),
-    enabled: !!selectedAssignmentId,
+    enabled: !!resolvedAssignmentId,
   });
 
   return (
@@ -75,7 +89,7 @@ export default function StaffGradingQueuePage() {
             value={selectedCourseId}
             onChange={(e) => {
               setSelectedCourseId(e.target.value);
-              setSelectedAssignmentId("");
+              setSelectedLessonId("");
             }}
             className="w-full rounded-[10px] border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary-teal/20"
           >
@@ -93,8 +107,8 @@ export default function StaffGradingQueuePage() {
             Assignment Lesson
           </label>
           <select
-            value={selectedAssignmentId}
-            onChange={(e) => setSelectedAssignmentId(e.target.value)}
+            value={selectedLessonId}
+            onChange={(e) => setSelectedLessonId(e.target.value)}
             disabled={!selectedCourseId}
             className="w-full rounded-[10px] border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-primary-teal/20 disabled:bg-slate-50 disabled:text-slate-400"
           >
@@ -132,16 +146,24 @@ export default function StaffGradingQueuePage() {
 
       {/* Submissions List */}
       <div className="rounded-[16px] border border-slate-200 bg-white shadow-sm overflow-hidden">
-        {!selectedAssignmentId ? (
+        {!selectedLessonId ? (
           <div className="p-12 text-center text-slate-500 space-y-2">
             <BookMarked className="h-8 w-8 text-slate-400 mx-auto" />
             <p className="text-sm font-semibold text-slate-800">
               Select a Course and Assignment above to view the grading queue.
             </p>
           </div>
-        ) : submissionsLoading ? (
+        ) : assignmentLoading || submissionsLoading ? (
           <div className="flex h-64 items-center justify-center">
             <Loader2 className="h-8 w-8 animate-spin text-primary-teal" />
+          </div>
+        ) : assignmentMissing || !resolvedAssignmentId ? (
+          <div className="p-12 text-center text-slate-500 space-y-2">
+            <Clock className="h-8 w-8 text-amber-500 mx-auto" />
+            <p className="text-sm font-semibold text-slate-800">Assignment Not Configured</p>
+            <p className="text-xs text-slate-500">
+              This curriculum lesson does not have an assignment rubric configured yet.
+            </p>
           </div>
         ) : !submissionsData?.items?.length ? (
           <div className="p-12 text-center text-slate-500 space-y-2">

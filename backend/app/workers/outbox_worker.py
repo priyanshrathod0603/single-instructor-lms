@@ -316,7 +316,7 @@ def _format_email_html(event: NotificationOutbox) -> Optional[str]:
         amount_inr = payload.get("amount_inr", 0)
         formatted_amount = f"₹{amount_inr / 100:.2f}" if isinstance(amount_inr, (int, float)) else str(amount_inr)
         payment_id = payload.get("razorpay_payment_id", "N/A")
-        dashboard_link = f"{frontend_url}/dashboard"
+        dashboard_link = f"{frontend_url}/app"
 
         return f"""<!DOCTYPE html>
 <html lang="en">

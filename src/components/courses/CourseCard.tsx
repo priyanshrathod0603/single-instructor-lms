@@ -9,6 +9,7 @@ import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { formatCurrency } from "@/lib/utils";
+import { resolveApiAssetUrl } from "@/lib/api/client";
 
 interface CourseCardProps {
   course: CourseSummary;
@@ -18,6 +19,7 @@ interface CourseCardProps {
 export const CourseCard: React.FC<CourseCardProps> = ({ course, className }) => {
   const [imageError, setImageError] = useState(false);
   const courseUrl = `/courses/${course.slug || course.id}`;
+  const thumbnailSrc = resolveApiAssetUrl(course.thumbnail_url);
 
   return (
     <Card
@@ -27,15 +29,15 @@ export const CourseCard: React.FC<CourseCardProps> = ({ course, className }) => 
     >
       {/* 16:9 Thumbnail Header */}
       <div className="relative aspect-video w-full overflow-hidden bg-slate-100">
-        {course.thumbnail_url && !imageError ? (
+        {thumbnailSrc && !imageError ? (
           <Image
-            src={course.thumbnail_url}
+            src={thumbnailSrc}
             alt={course.title}
             fill
             sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
             className="object-cover transition-transform duration-300 group-hover:scale-105"
             onError={() => setImageError(true)}
-            unoptimized={course.thumbnail_url.startsWith("http")}
+            unoptimized={thumbnailSrc.startsWith("http") || thumbnailSrc.includes("/api/v1/media/public/")}
           />
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-primary-teal/15 via-accent-mint/30 to-soft-peach/40 p-6 text-center">

@@ -21,6 +21,31 @@ interface PublishChecklistModalProps {
   onSuccess?: () => void;
 }
 
+function getActionableHint(code: string): string | null {
+  switch (code) {
+    case "MEDIA_NOT_READY":
+      return "Video is transcoding in the background. Wait a moment for processing to finish, or select a ready video from Media Library.";
+    case "EMPTY_TITLE":
+    case "EMPTY_SLUG":
+    case "EMPTY_HEADLINE":
+      return "Go to Course Details to fill in required metadata.";
+    case "INVALID_PRICING":
+      return "Configure a price in INR in Course Settings, or mark the course as Free.";
+    case "NO_SECTIONS":
+      return "Add at least one curriculum section in the Curriculum tab.";
+    case "EMPTY_SECTION":
+      return "Add at least one lesson to this section, or remove the empty section.";
+    case "EMPTY_QUIZ":
+    case "EMPTY_QUIZ_OPTIONS":
+    case "NO_CORRECT_OPTION":
+      return "Open Quiz Builder to add questions and designate correct answer options.";
+    case "EMPTY_ASSIGNMENT":
+      return "Add instructions and a grading rubric for this assignment.";
+    default:
+      return null;
+  }
+}
+
 export const PublishChecklistModal: React.FC<PublishChecklistModalProps> = ({
   isOpen,
   onClose,
@@ -83,6 +108,21 @@ export const PublishChecklistModal: React.FC<PublishChecklistModalProps> = ({
             </div>
           ) : checklist ? (
             <>
+              {/* Mutation Error Feedback */}
+              {publishMutation.error && (
+                <div className="flex items-start gap-2.5 rounded-lg border border-rose-300 bg-rose-50 p-3.5 text-xs text-rose-900">
+                  <AlertTriangle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-bold">Publishing Blocked</p>
+                    <p className="mt-0.5 text-rose-700">
+                      {publishMutation.error instanceof Error
+                        ? publishMutation.error.message
+                        : "Pre-flight checklist validation failed. Please address the blockers below before publishing."}
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Overall Status Banner */}
               <div
                 className={`flex items-start gap-3 rounded-[12px] p-4 border ${
@@ -115,18 +155,27 @@ export const PublishChecklistModal: React.FC<PublishChecklistModalProps> = ({
                     Blocking Issues ({checklist.blockers.length})
                   </h4>
                   <div className="space-y-2">
-                    {checklist.blockers.map((b, idx) => (
-                      <div
-                        key={idx}
-                        className="flex items-start gap-2.5 rounded-lg border border-rose-200 bg-rose-50/50 p-3 text-xs text-rose-900"
-                      >
-                        <XCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
-                        <div>
-                          <p className="font-semibold">{b.message}</p>
-                          <p className="text-[11px] text-rose-700 mt-0.5 font-mono">Code: {b.code}</p>
+                    {checklist.blockers.map((b, idx) => {
+                      const hint = getActionableHint(b.code);
+                      return (
+                        <div
+                          key={idx}
+                          className="flex items-start gap-2.5 rounded-lg border border-rose-200 bg-rose-50/50 p-3 text-xs text-rose-900"
+                        >
+                          <XCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-rose-950">{b.message}</p>
+                            {hint && (
+                              <p className="text-[11px] text-slate-700 mt-1 bg-white/70 rounded p-1.5 border border-rose-100">
+                                <span className="font-semibold text-slate-900">How to fix: </span>
+                                {hint}
+                              </p>
+                            )}
+                            <p className="text-[10px] text-rose-500 mt-1 font-mono">Code: {b.code}</p>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

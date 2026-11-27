@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.media import (
     ALLOWED_MIME_TYPES,
@@ -101,8 +101,21 @@ class MediaAssetResponse(BaseModel):
     file_size_bytes: int
     status: str
     transcode_output: Optional[dict[str, Any]] = None
+    public_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def _populate_public_url(self) -> "MediaAssetResponse":
+        """Expose canonical public thumbnail URL only for verified READY public images."""
+        if (
+            self.public_url is None
+            and self.status == "READY"
+            and self.file_key.startswith("public-images/")
+            and self.mime_type in {"image/png", "image/jpeg", "image/webp"}
+        ):
+            self.public_url = f"/api/v1/media/public/{self.id}"
+        return self
 
 
 class MediaAssetListResponse(BaseModel):

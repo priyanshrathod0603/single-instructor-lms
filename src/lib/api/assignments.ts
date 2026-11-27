@@ -107,6 +107,19 @@ export const assignmentsApi = {
   },
 
   /**
+   * List the authenticated student's own submissions for an assignment.
+   */
+  async listOwnSubmissions(
+    assignmentId: string,
+    params?: { page?: number; size?: number }
+  ): Promise<SubmissionListResponse> {
+    return apiClient.get<SubmissionListResponse>(
+      `/assignments/${encodeURIComponent(assignmentId)}/my-submissions`,
+      { params }
+    );
+  },
+
+  /**
    * Grade a student submission against rubric criteria.
    */
   async gradeSubmission(

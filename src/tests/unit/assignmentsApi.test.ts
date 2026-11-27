@@ -65,4 +65,40 @@ describe("assignmentsApi", () => {
     );
     expect(result.status).toBe("SUBMITTED");
   });
+
+  it("lists the student's own submissions for an assignment", async () => {
+    const mockList = {
+      items: [
+        {
+          id: "sub-1",
+          assignment_id: "asgn-1",
+          student_id: "stu-1",
+          attempt_no: 1,
+          file_url: "https://github.com/student/repo",
+          status: "GRADED",
+          submitted_at: "2026-01-01T00:00:00Z",
+          final_score: 90,
+          rubric_scores: [],
+          grade_overrides: [],
+        },
+      ],
+      total: 1,
+      page: 1,
+      size: 1,
+    };
+
+    vi.mocked(apiClient.get).mockResolvedValueOnce(mockList);
+
+    const result = await assignmentsApi.listOwnSubmissions("asgn-1", {
+      page: 1,
+      size: 1,
+    });
+
+    expect(apiClient.get).toHaveBeenCalledWith(
+      "/assignments/asgn-1/my-submissions",
+      { params: { page: 1, size: 1 } }
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].final_score).toBe(90);
+  });
 });

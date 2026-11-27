@@ -99,7 +99,7 @@ export default function SubmissionGradingWorkspacePage({
 
       return assignmentsApi.gradeSubmission(submissionId, {
         scores,
-        feedback: generalFeedback,
+        overall_feedback: generalFeedback,
       });
     },
     onSuccess: (updated) => {
@@ -116,7 +116,7 @@ export default function SubmissionGradingWorkspacePage({
   const overrideMutation = useMutation({
     mutationFn: () =>
       assignmentsApi.overrideGrade(submissionId, {
-        overridden_score: Number(overrideScore),
+        new_score: Number(overrideScore),
         reason: overrideReason.trim(),
       }),
     onSuccess: () => {

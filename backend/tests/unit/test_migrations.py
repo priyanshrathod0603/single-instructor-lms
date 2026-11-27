@@ -419,7 +419,7 @@ class TestAlembicCheckAndSafety:
 
         heads = script.get_heads()
         assert len(heads) == 1, f"Expected 1 head, found: {heads}"
-        assert heads[0] == "f2a3b4c5d6e7"
+        assert heads[0] == "a3b4c5d6e7f8"
 
 
 class TestMigrationScriptTemplate:

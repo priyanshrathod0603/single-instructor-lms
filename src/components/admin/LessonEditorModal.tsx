@@ -66,9 +66,10 @@ export const LessonEditorModal: React.FC<LessonEditorModalProps> = ({
   const [assignmentMaxScore, setAssignmentMaxScore] = useState(100);
   const [rubricTitle, setRubricTitle] = useState("Grading Rubric");
   const [rubricCriteria, setRubricCriteria] = useState<Array<{ title: string; max_points: number; weight: number }>>([
-    { title: "Technical Correctness", max_points: 50, weight: 50 },
-    { title: "Code Quality & Documentation", max_points: 50, weight: 50 },
+    { title: "Technical Correctness", max_points: 50, weight: 1 },
+    { title: "Code Quality & Documentation", max_points: 50, weight: 1 },
   ]);
+  const [assignmentMessage, setAssignmentMessage] = useState<string | null>(null);
 
   // Resource adding
   const [resourceTitle, setResourceTitle] = useState("");
@@ -111,6 +112,48 @@ export const LessonEditorModal: React.FC<LessonEditorModalProps> = ({
     enabled: isOpen && lesson?.lesson_type === "ASSIGNMENT",
     retry: false,
   });
+
+  useEffect(() => {
+    setQuizMessage(null);
+    setAssignmentMessage(null);
+  }, [lesson?.id]);
+
+  useEffect(() => {
+    if (existingQuiz) {
+      setQuizPassPercentage(existingQuiz.pass_percentage);
+      setQuizTimeLimit(existingQuiz.time_limit_minutes);
+    } else if (lesson?.lesson_type === "QUIZ") {
+      setQuizPassPercentage(80);
+      setQuizTimeLimit(15);
+    }
+  }, [existingQuiz, lesson?.id, lesson?.lesson_type]);
+
+  useEffect(() => {
+    if (existingAssignment) {
+      setAssignmentInstructions(existingAssignment.instructions || "");
+      setAssignmentMaxScore(existingAssignment.max_score ?? 100);
+      if (existingAssignment.active_rubric) {
+        setRubricTitle(existingAssignment.active_rubric.title || "Grading Rubric");
+        if (existingAssignment.active_rubric.criteria?.length) {
+          setRubricCriteria(
+            existingAssignment.active_rubric.criteria.map((c) => ({
+              title: c.title,
+              max_points: c.max_points,
+              weight: c.weight ?? 1,
+            }))
+          );
+        }
+      }
+    } else if (lesson?.lesson_type === "ASSIGNMENT") {
+      setAssignmentInstructions("");
+      setAssignmentMaxScore(100);
+      setRubricTitle("Grading Rubric");
+      setRubricCriteria([
+        { title: "Technical Correctness", max_points: 50, weight: 1 },
+        { title: "Code Quality & Documentation", max_points: 50, weight: 1 },
+      ]);
+    }
+  }, [existingAssignment, lesson?.id, lesson?.lesson_type]);
 
   const updateLessonMutation = useMutation({
     mutationFn: async () => {
@@ -163,22 +206,24 @@ export const LessonEditorModal: React.FC<LessonEditorModalProps> = ({
   const saveQuizMutation = useMutation({
     mutationFn: async () => {
       if (!lesson) return;
-      if (!existingQuiz) {
-        await quizzesApi.createQuiz(lesson.id, {
+      let targetQuizId = existingQuiz?.id;
+      if (!targetQuizId) {
+        const createdQuiz = await quizzesApi.createQuiz(lesson.id, {
           title,
           pass_percentage: Number(quizPassPercentage),
           time_limit_minutes: Number(quizTimeLimit),
         });
+        targetQuizId = createdQuiz.id;
       } else {
-        await quizzesApi.updateQuiz(existingQuiz.id, {
+        await quizzesApi.updateQuiz(targetQuizId, {
           title,
           pass_percentage: Number(quizPassPercentage),
           time_limit_minutes: Number(quizTimeLimit),
         });
       }
 
-      if (csvContent.trim() && existingQuiz) {
-        await quizzesApi.bulkImportCsv(existingQuiz.id, csvContent);
+      if (csvContent.trim() && targetQuizId) {
+        await quizzesApi.bulkImportCsv(targetQuizId, csvContent);
       }
     },
     onSuccess: () => {
@@ -224,6 +269,10 @@ export const LessonEditorModal: React.FC<LessonEditorModalProps> = ({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["lesson-assignment", lesson?.id] });
+      setAssignmentMessage("Assignment and rubric successfully saved!");
+    },
+    onError: (err: any) => {
+      setAssignmentMessage(err?.message || "Failed to update assignment.");
     },
   });
 
@@ -453,6 +502,11 @@ export const LessonEditorModal: React.FC<LessonEditorModalProps> = ({
 
                 {lesson.lesson_type === "ASSIGNMENT" && (
                   <div className="space-y-4">
+                    {assignmentMessage && (
+                      <div className="p-3 rounded-lg bg-teal-50 border border-teal-200 text-teal-800 text-xs">
+                        {assignmentMessage}
+                      </div>
+                    )}
                     <div>
                       <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
                         Assignment Instructions & Prompt
@@ -486,7 +540,7 @@ export const LessonEditorModal: React.FC<LessonEditorModalProps> = ({
                           onClick={() =>
                             setRubricCriteria([
                               ...rubricCriteria,
-                              { title: "New Criterion", max_points: 25, weight: 25 },
+                              { title: "New Criterion", max_points: 25, weight: 1 },
                             ])
                           }
                         >

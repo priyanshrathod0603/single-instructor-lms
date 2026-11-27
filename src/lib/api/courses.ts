@@ -3,7 +3,9 @@ import {
   CourseDetail,
   CourseListParams,
   CourseListResponse,
+  CourseMetadataOptionsResponse,
   CourseRevision,
+  CourseSlugCheckResponse,
   CourseSummary,
   CreateCoursePayload,
   CreateLessonPayload,
@@ -38,8 +40,33 @@ export const coursesApi = {
       params: {
         search: params?.search || undefined,
         tag: params?.tag || undefined,
+        category: params?.category || undefined,
+        difficulty_level: params?.difficulty_level || undefined,
+        language: params?.language || undefined,
         page: params?.page ?? 1,
         per_page: params?.per_page ?? 20,
+      },
+    });
+  },
+
+  /**
+   * Fetch canonical metadata options (categories, difficulty levels, languages, currencies).
+   */
+  async getMetadataOptions(): Promise<CourseMetadataOptionsResponse> {
+    return apiClient.get<CourseMetadataOptionsResponse>("/courses/metadata-options");
+  },
+
+  /**
+   * Check real-time course slug availability for create and edit forms.
+   */
+  async checkSlugAvailability(
+    slug: string,
+    excludeCourseId?: string,
+  ): Promise<CourseSlugCheckResponse> {
+    return apiClient.get<CourseSlugCheckResponse>("/courses/slug-available", {
+      params: {
+        slug,
+        exclude_course_id: excludeCourseId || undefined,
       },
     });
   },
@@ -61,8 +88,12 @@ export const coursesApi = {
   async listManageCourses(params?: CourseListParams): Promise<CourseListResponse> {
     return apiClient.get<CourseListResponse>("/courses/manage", {
       params: {
+        status: params?.status || undefined,
         search: params?.search || undefined,
         tag: params?.tag || undefined,
+        category: params?.category || undefined,
+        difficulty_level: params?.difficulty_level || undefined,
+        language: params?.language || undefined,
         page: params?.page ?? 1,
         per_page: params?.per_page ?? 20,
       },
@@ -72,15 +103,15 @@ export const coursesApi = {
   /**
    * Create new course entity and initial working draft revision.
    */
-  async createCourse(data: CreateCoursePayload): Promise<CourseSummary> {
-    return apiClient.post<CourseSummary>("/courses", data);
+  async createCourse(data: CreateCoursePayload): Promise<CourseDetail> {
+    return apiClient.post<CourseDetail>("/courses", data);
   },
 
   /**
-   * Update top-level course metadata (title, price, thumbnail, tags).
+   * Update top-level course metadata (slug, title, category, difficulty, outcomes, pricing, tags).
    */
-  async updateCourse(id: string, data: UpdateCoursePayload): Promise<CourseSummary> {
-    return apiClient.patch<CourseSummary>(`/courses/${id}`, data);
+  async updateCourse(id: string, data: UpdateCoursePayload): Promise<CourseDetail> {
+    return apiClient.patch<CourseDetail>(`/courses/${id}`, data);
   },
 
   /**

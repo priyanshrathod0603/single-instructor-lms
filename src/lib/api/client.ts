@@ -27,6 +27,17 @@ export function getApiBaseUrl(): string {
   return configuredUrl;
 }
 
+export function resolveApiAssetUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("/")) {
+    const base = getApiBaseUrl().replace(/\/$/, "");
+    return `${base}${trimmed}`;
+  }
+  return trimmed;
+}
+
 export interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | boolean | undefined>;
   idempotencyKey?: string;

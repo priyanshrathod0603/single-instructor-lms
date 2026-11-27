@@ -107,7 +107,7 @@ describe("Admin & Instructor API Clients Integration", () => {
 
     await assignmentsApi.gradeSubmission("s1", {
       scores: [{ criteria_id: "crit_1", points_awarded: 10, feedback: "Great work!" }],
-      feedback: "Overall excellent",
+      overall_feedback: "Overall excellent",
     });
     const [url, opts] = mockFetch.mock.calls[0];
     expect(new URL(url).pathname).toBe("/api/v1/submissions/s1/grade");

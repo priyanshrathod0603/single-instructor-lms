@@ -10,6 +10,7 @@ import {
   AlertTriangle,
   Clock,
   Sparkles,
+  LayoutDashboard,
 } from "lucide-react";
 import { controlApi } from "@/lib/api/control";
 import { Button } from "@/components/ui/Button";
@@ -164,6 +165,18 @@ export default function ControlGovernancePage() {
         </div>
 
         <div className="flex items-center gap-2 self-start sm:self-auto">
+          <Link href="/admin">
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-xs text-slate-700 hover:text-slate-900 border-slate-300"
+              title="Switch to Admin Console"
+            >
+              <LayoutDashboard className="h-3.5 w-3.5 mr-1.5 text-primary-teal" />
+              Admin Console
+            </Button>
+          </Link>
+
           <Button
             variant="outline"
             size="sm"

@@ -228,11 +228,19 @@ class CourseGovernanceItemResponse(BaseModel):
     headline: Optional[str] = None
     description: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    category: str = "General"
+    difficulty_level: str = "ALL_LEVELS"
+    language: str = "English"
     status: str
     price_inr: int
+    compare_at_price_inr: Optional[int] = None
+    currency: str = "INR"
+    discount_percentage: Optional[int] = None
     is_free: bool
     tags: List[str] = Field(default_factory=list)
     live_revision_id: Optional[uuid.UUID] = None
+    draft_revision_id: Optional[uuid.UUID] = None
+    latest_revision_id: Optional[uuid.UUID] = None
     total_sections: int = 0
     total_lessons: int = 0
     total_duration_seconds: int = 0

@@ -11,8 +11,10 @@ import {
   AlertCircle,
   Loader2,
   X,
+  RefreshCw,
 } from "lucide-react";
 import { mediaApi } from "@/lib/api/media";
+import { getApiBaseUrl } from "@/lib/api/client";
 import { MediaAssetResponse } from "@/types/media";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -39,10 +41,23 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
   const [isUploading, setIsUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const { data: mediaData, isLoading } = useQuery({
+  const {
+    data: mediaData,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ["media-assets", allowedMimeType],
     queryFn: () => mediaApi.listMediaAssets({ per_page: 50, mime_type: allowedMimeType }),
     enabled: isOpen,
+    refetchInterval: (query) => {
+      const items = query.state.data?.items || [];
+      const hasPending = items.some(
+        (asset) => asset.status === "UPLOADING" || asset.status === "PROCESSING"
+      );
+      return hasPending ? 3000 : false;
+    },
   });
 
   const displayedItems = (mediaData?.items || []).filter((asset) => {
@@ -92,13 +107,23 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
         file_size_bytes: uploadFile.size,
       });
 
-      // 2. Direct binary PUT to storage presigned URL
+      // 2. Direct binary PUT to storage presigned URL (resolving local dev backend URL if needed)
+      let uploadUrl = intent.presigned_url;
+      if (uploadUrl.startsWith("/")) {
+        uploadUrl = `${getApiBaseUrl()}${uploadUrl}`;
+      } else if (uploadUrl.includes("localhost:8000") && typeof window !== "undefined") {
+        const apiBase = getApiBaseUrl();
+        if (!apiBase.includes("localhost:8000")) {
+          uploadUrl = uploadUrl.replace("http://localhost:8000", apiBase);
+        }
+      }
+
       const uploadHeaders: Record<string, string> = {
         ...(intent.headers || {}),
         "Content-Type": uploadFile.type || "application/octet-stream",
       };
 
-      const putRes = await fetch(intent.presigned_url, {
+      const putRes = await fetch(uploadUrl, {
         method: "PUT",
         headers: uploadHeaders,
         body: uploadFile,
@@ -195,7 +220,26 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
             <h3 className="text-sm font-semibold text-slate-700 mb-3">
               Existing Media Assets ({displayedItems.length})
             </h3>
-            {isLoading ? (
+            {isError ? (
+              <div className="rounded-lg border border-rose-200 bg-rose-50/60 p-6 text-center space-y-3">
+                <div className="p-2 rounded-full bg-rose-100 text-rose-600 w-fit mx-auto">
+                  <AlertCircle className="h-5 w-5" />
+                </div>
+                <p className="text-xs font-semibold text-rose-800">
+                  {error instanceof Error ? error.message : "Failed to load media assets."}
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => refetch()}
+                  className="text-xs text-rose-700 border-rose-300 hover:bg-rose-100"
+                >
+                  <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
+                  Retry Connection
+                </Button>
+              </div>
+            ) : isLoading ? (
               <div className="flex h-48 items-center justify-center">
                 <Loader2 className="h-8 w-8 animate-spin text-primary-teal" />
               </div>
@@ -241,9 +285,18 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
                       </div>
 
                       <div className="mt-4 flex items-center justify-between pt-3 border-t border-slate-100">
-                        <Badge variant={asset.status === "READY" ? "success" : "outline"}>
-                          {asset.status}
-                        </Badge>
+                        {asset.status === "READY" ? (
+                          <Badge variant="success">Ready</Badge>
+                        ) : asset.status === "PROCESSING" ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                            <Loader2 className="h-2.5 w-2.5 animate-spin text-amber-600" />
+                            Processing...
+                          </span>
+                        ) : asset.status === "FAILED" ? (
+                          <Badge variant="error">Failed</Badge>
+                        ) : (
+                          <Badge variant="outline">{asset.status}</Badge>
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -269,8 +322,13 @@ export const MediaLibraryModal: React.FC<MediaLibraryModalProps> = ({
 
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-slate-200 px-6 py-4 bg-slate-50">
-          <div className="text-xs text-slate-500">
-            {selectedAsset ? `Selected: ${selectedAsset.filename}` : "No asset selected"}
+          <div className="text-xs text-slate-500 flex flex-col">
+            <span>{selectedAsset ? `Selected: ${selectedAsset.filename}` : "No asset selected"}</span>
+            {selectedAsset?.status === "PROCESSING" && (
+              <span className="text-[11px] text-amber-600 font-medium">
+                Note: Video is still transcoding. You can attach it now; publishing will unlock once ready.
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <Button variant="ghost" size="sm" onClick={onClose}>

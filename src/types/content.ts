@@ -18,6 +18,8 @@ export interface CourseGovernanceItem {
   is_free: boolean;
   tags: string[];
   live_revision_id?: string | null;
+  draft_revision_id?: string | null;
+  latest_revision_id?: string | null;
   total_sections: number;
   total_lessons: number;
   total_duration_seconds: number;

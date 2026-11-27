@@ -31,6 +31,17 @@ interface StaffAdminSidebarProps {
   portal: "staff" | "admin" | "control";
 }
 
+interface NavItem {
+  label: string;
+  href: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+interface NavSection {
+  title?: string;
+  items: NavItem[];
+}
+
 export const StaffAdminSidebar: React.FC<StaffAdminSidebarProps> = ({ portal }) => {
   const pathname = usePathname();
   const { user, logout, isLoggingOut } = useAuth();
@@ -38,15 +49,20 @@ export const StaffAdminSidebar: React.FC<StaffAdminSidebarProps> = ({ portal }) 
 
   const isSuperAdmin = user?.roles?.includes("SUPER_ADMIN") ?? false;
 
-  const getLinks = () => {
+  const getSections = (): NavSection[] => {
     if (portal === "staff") {
       return [
-        { label: "Grading Queue", href: "/staff", icon: CheckCircle2 },
-        { label: "Grading Workspace", href: "/staff/grading", icon: FileText },
+        {
+          items: [
+            { label: "Grading Queue", href: "/staff", icon: CheckCircle2 },
+            { label: "Grading Workspace", href: "/staff/grading", icon: FileText },
+          ],
+        },
       ];
     }
+
     if (portal === "admin") {
-      const items = [
+      const operations: NavItem[] = [
         { label: "Dashboard", href: "/admin", icon: ShieldAlert },
         { label: "Course Management", href: "/admin/courses", icon: BookMarked },
         { label: "Media Library", href: "/admin/media", icon: Film },
@@ -54,38 +70,73 @@ export const StaffAdminSidebar: React.FC<StaffAdminSidebarProps> = ({ portal }) 
         { label: "Enrollment Grants", href: "/admin/enrollments", icon: GraduationCap },
         { label: "Financial Ledger", href: "/admin/orders", icon: CreditCard },
       ];
+
+      const sections: NavSection[] = [
+        { title: "Operations", items: operations },
+      ];
+
       if (isSuperAdmin) {
-        items.push({
-          label: "Super Admin Control",
-          href: "/control",
-          icon: ShieldCheck,
+        sections.push({
+          title: "Super Admin Control",
+          items: [
+            { label: "Super Admin Control", href: "/control", icon: ShieldCheck },
+            { label: "User Management", href: "/control/users", icon: Users },
+            { label: "Security & Sessions", href: "/control/sessions", icon: KeyRound },
+            { label: "Platform Settings", href: "/control/settings", icon: Settings },
+            { label: "Audit Logs", href: "/control/audit", icon: FileText },
+          ],
         });
       }
-      return items;
+
+      return sections;
     }
+
+    // portal === "control"
     return [
-      { label: "Governance Overview", href: "/control", icon: ShieldAlert },
-      { label: "Course Governance", href: "/control/courses", icon: BookMarked },
-      { label: "Blog CMS", href: "/control/blog", icon: FileEdit },
-      { label: "Notes CMS", href: "/control/notes", icon: FileText },
-      { label: "User Management", href: "/control/users", icon: Users },
-      { label: "Administrator Hub", href: "/control/admins", icon: ShieldCheck },
-      { label: "Staff Management", href: "/control/staff", icon: UserCog },
-      { label: "Security & Sessions", href: "/control/sessions", icon: KeyRound },
-      { label: "Permissions Matrix", href: "/control/permissions", icon: ShieldAlert },
-      { label: "Offers & Discounts", href: "/control/offers", icon: Tag },
-      { label: "Payment Overview", href: "/control/payments", icon: CreditCard },
-      { label: "Platform Settings", href: "/control/settings", icon: Settings },
-      { label: "Audit Logs", href: "/control/audit", icon: FileText },
+      {
+        title: "Operations Workspace",
+        items: [
+          { label: "Admin Console", href: "/admin", icon: ShieldAlert },
+          { label: "Course Management", href: "/admin/courses", icon: BookMarked },
+          { label: "Media Library", href: "/admin/media", icon: Film },
+          { label: "Student Roster", href: "/admin/students", icon: Users },
+          { label: "Financial Ledger", href: "/admin/orders", icon: CreditCard },
+        ],
+      },
+      {
+        title: "Governance & Content",
+        items: [
+          { label: "Governance Overview", href: "/control", icon: ShieldAlert },
+          { label: "Course Governance", href: "/control/courses", icon: BookMarked },
+          { label: "Blog CMS", href: "/control/blog", icon: FileEdit },
+          { label: "Notes CMS", href: "/control/notes", icon: FileText },
+          { label: "Offers & Discounts", href: "/control/offers", icon: Tag },
+          { label: "Payment Overview", href: "/control/payments", icon: CreditCard },
+        ],
+      },
+      {
+        title: "Platform & Security",
+        items: [
+          { label: "User Management", href: "/control/users", icon: Users },
+          { label: "Administrator Hub", href: "/control/admins", icon: ShieldCheck },
+          { label: "Staff Management", href: "/control/staff", icon: UserCog },
+          { label: "Security & Sessions", href: "/control/sessions", icon: KeyRound },
+          { label: "Permissions Matrix", href: "/control/permissions", icon: ShieldAlert },
+          { label: "Platform Settings", href: "/control/settings", icon: Settings },
+          { label: "Audit Logs", href: "/control/audit", icon: FileText },
+        ],
+      },
     ];
   };
 
-  const links = getLinks();
+  const sections = getSections();
   const portalTitle =
     portal === "staff"
       ? "Staff Portal"
       : portal === "admin"
-      ? "Admin Console"
+      ? isSuperAdmin
+        ? "Admin & Control"
+        : "Admin Console"
       : "Super Admin Control";
 
   const getParentRoute = (): { href: string; label: string } | null => {
@@ -185,30 +236,42 @@ export const StaffAdminSidebar: React.FC<StaffAdminSidebarProps> = ({ portal }) 
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <nav className="flex-1 space-y-1 overflow-y-auto">
-              {links.map((item) => {
-                const Icon = item.icon;
-                const isActive =
-                  pathname === item.href ||
-                  (item.href !== `/${portal}` && pathname.startsWith(item.href));
+            <nav className="flex-1 space-y-3 overflow-y-auto">
+              {sections.map((section, sIdx) => (
+                <div key={section.title || sIdx} className="space-y-1">
+                  {section.title && (
+                    <div className="px-3.5 pt-2 pb-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      {section.title}
+                    </div>
+                  )}
+                  {section.items.map((item) => {
+                    const Icon = item.icon;
+                    const isActive =
+                      pathname === item.href ||
+                      (item.href !== "/admin" &&
+                        item.href !== "/control" &&
+                        item.href !== "/staff" &&
+                        pathname.startsWith(item.href));
 
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={() => setMobileOpen(false)}
-                    className={cn(
-                      "group flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 font-sans text-sm font-medium transition-colors min-h-[44px]",
-                      isActive
-                        ? "bg-primary-teal text-white font-semibold"
-                        : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                    )}
-                  >
-                    <Icon className="h-5 w-5 shrink-0" />
-                    <span>{item.label}</span>
-                  </Link>
-                );
-              })}
+                    return (
+                      <Link
+                        key={item.href}
+                        href={item.href}
+                        onClick={() => setMobileOpen(false)}
+                        className={cn(
+                          "group flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 font-sans text-sm font-medium transition-colors min-h-[44px]",
+                          isActive
+                            ? "bg-primary-teal text-white font-semibold"
+                            : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                        )}
+                      >
+                        <Icon className="h-5 w-5 shrink-0" />
+                        <span>{item.label}</span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              ))}
             </nav>
             <div className="border-t border-slate-800 pt-4 mt-auto space-y-2">
               <Link
@@ -240,29 +303,41 @@ export const StaffAdminSidebar: React.FC<StaffAdminSidebarProps> = ({ portal }) 
           </span>
         </div>
 
-        <nav className="flex-1 space-y-1.5 px-3 py-4" aria-label={`${portalTitle} Navigation`}>
-          {links.map((item) => {
-            const Icon = item.icon;
-            const isActive =
-              pathname === item.href ||
-              (item.href !== `/${portal}` && pathname.startsWith(item.href));
+        <nav className="flex-1 space-y-3 px-3 py-4 overflow-y-auto" aria-label={`${portalTitle} Navigation`}>
+          {sections.map((section, sIdx) => (
+            <div key={section.title || sIdx} className="space-y-1">
+              {section.title && (
+                <div className="px-3.5 pt-2 pb-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                  {section.title}
+                </div>
+              )}
+              {section.items.map((item) => {
+                const Icon = item.icon;
+                const isActive =
+                  pathname === item.href ||
+                  (item.href !== "/admin" &&
+                    item.href !== "/control" &&
+                    item.href !== "/staff" &&
+                    pathname.startsWith(item.href));
 
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "group flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 font-sans text-sm font-medium transition-colors min-h-[44px]",
-                  isActive
-                    ? "bg-primary-teal text-white font-semibold"
-                    : "text-slate-300 hover:bg-slate-800 hover:text-white"
-                )}
-              >
-                <Icon className="h-5 w-5 shrink-0" />
-                <span>{item.label}</span>
-              </Link>
-            );
-          })}
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      "group flex items-center gap-3 rounded-[10px] px-3.5 py-2.5 font-sans text-sm font-medium transition-colors min-h-[44px]",
+                      isActive
+                        ? "bg-primary-teal text-white font-semibold"
+                        : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                    )}
+                  >
+                    <Icon className="h-5 w-5 shrink-0" />
+                    <span>{item.label}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
         <div className="border-t border-slate-800 p-4 space-y-2">

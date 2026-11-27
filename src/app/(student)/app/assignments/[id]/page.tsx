@@ -60,7 +60,7 @@ export default function AssignmentDetailPage() {
     queryKey: ["assignment-submissions", assignment?.id],
     queryFn: () =>
       assignment?.id
-        ? assignmentsApi.listAssignmentSubmissions(assignment.id, { page: 1, size: 1 })
+        ? assignmentsApi.listOwnSubmissions(assignment.id, { page: 1, size: 1 })
         : null,
     enabled: !!assignment?.id,
     retry: false,

@@ -17,7 +17,9 @@ Strict Invariants:
 
 from datetime import datetime, timedelta, timezone
 import logging
+from pathlib import Path
 import re
+import struct
 from typing import Any, Optional, Tuple, Union
 import uuid
 
@@ -97,6 +99,72 @@ _EXTENSIONS_BY_MIME = {
     "application/x-tar": {".tar"},
     "application/gzip": {".gz", ".gzip"},
 }
+
+
+def _extract_image_dimensions(mime_type: str, data: bytes) -> Optional[Tuple[int, int]]:
+    """Decode and validate structural image headers (PNG, JPEG, WebP) without Pillow."""
+    if mime_type == "image/png":
+        if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n") or data[12:16] != b"IHDR":
+            return None
+        width, height = struct.unpack(">II", data[16:24])
+        return (width, height) if 0 < width <= 16384 and 0 < height <= 16384 else None
+
+    if mime_type == "image/jpeg":
+        if len(data) < 4 or not data.startswith(b"\xff\xd8"):
+            return None
+        i = 2
+        length = len(data)
+        sof_markers = {
+            0xC0, 0xC1, 0xC2, 0xC3,
+            0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB,
+            0xCD, 0xCE, 0xCF,
+        }
+        while i < length:
+            while i < length and data[i] != 0xFF:
+                i += 1
+            while i < length and data[i] == 0xFF:
+                i += 1
+            if i >= length:
+                break
+            marker = data[i]
+            i += 1
+            if marker in (0xD8, 0xD9, 0x00, 0x01) or (0xD0 <= marker <= 0xD7):
+                continue
+            if i + 2 > length:
+                break
+            seg_len = struct.unpack(">H", data[i : i + 2])[0]
+            if seg_len < 2 or i + seg_len > length:
+                break
+            if marker in sof_markers:
+                if seg_len < 7:
+                    return None
+                height, width = struct.unpack(">HH", data[i + 3 : i + 7])
+                return (width, height) if 0 < width <= 16384 and 0 < height <= 16384 else None
+            i += seg_len
+        return None
+
+    if mime_type == "image/webp":
+        if len(data) < 21 or not data.startswith(b"RIFF") or data[8:12] != b"WEBP":
+            return None
+        chunk_type = data[12:16]
+        if chunk_type == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
+            raw_w, raw_h = struct.unpack("<HH", data[26:30])
+            width = raw_w & 0x3FFF
+            height = raw_h & 0x3FFF
+            return (width, height) if 0 < width <= 16384 and 0 < height <= 16384 else None
+        if chunk_type == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
+            bits = struct.unpack("<I", data[21:25])[0]
+            width = (bits & 0x3FFF) + 1
+            height = ((bits >> 14) & 0x3FFF) + 1
+            return (width, height) if 0 < width <= 16384 and 0 < height <= 16384 else None
+        if chunk_type == b"VP8X" and len(data) >= 30:
+            width = int.from_bytes(data[24:27], "little") + 1
+            height = int.from_bytes(data[27:30], "little") + 1
+            return (width, height) if 0 < width <= 16384 and 0 < height <= 16384 else None
+        return None
+
+    return None
 
 
 def _matches_binary_signature(mime_type: str, prefix: bytes) -> bool:
@@ -349,9 +417,26 @@ class MediaService:
             }
         else:
             # Images, PDFs, archives transition directly to READY
+            image_meta: dict[str, Any] = dict(data.metadata or {})
+            if asset.mime_type in {"image/png", "image/jpeg", "image/webp"}:
+                try:
+                    image_bytes = self.storage_client.get_object(asset.file_key)
+                except Exception as img_err:
+                    raise BadRequestException(
+                        message="Uploaded image file could not be read from storage.",
+                        code="IMAGE_UNREADABLE",
+                    ) from img_err
+                dimensions = _extract_image_dimensions(asset.mime_type, image_bytes)
+                if dimensions is None:
+                    raise BadRequestException(
+                        message="Uploaded image file is corrupted or has invalid image structure.",
+                        code="INVALID_IMAGE_CONTENT",
+                    )
+                image_meta["width"] = dimensions[0]
+                image_meta["height"] = dimensions[1]
             new_status = MEDIA_STATUS_READY
             transcode_output = {
-                "metadata": data.metadata or {},
+                "metadata": image_meta,
             }
 
         updated = self.repo.update_status(
@@ -376,6 +461,35 @@ class MediaService:
         )
 
         return MediaAssetResponse.model_validate(updated)
+
+    def get_public_image(
+        self,
+        session: Session,
+        media_id: uuid.UUID,
+    ) -> Tuple[bytes, str]:
+        """Return verified public-images READY asset bytes and safe MIME type."""
+        asset = self.repo.get_by_id(session, media_id)
+        if asset is None:
+            raise ResourceNotFoundException("MediaAsset", str(media_id))
+
+        if (
+            not asset.file_key.startswith("public-images/")
+            or asset.mime_type not in {"image/png", "image/jpeg", "image/webp"}
+        ):
+            raise ForbiddenException(
+                message="Direct public access is restricted to verified course images.",
+                code="PUBLIC_ACCESS_DENIED",
+            )
+
+        if asset.status != "READY":
+            raise ResourceNotFoundException("MediaAsset", str(media_id))
+
+        try:
+            data = self.storage_client.get_object(asset.file_key)
+        except KeyError as err:
+            raise ResourceNotFoundException("MediaAsset", str(media_id)) from err
+
+        return data, asset.mime_type
 
     async def complete_video_transcode(
         self,
@@ -670,6 +784,7 @@ class MediaService:
         user: User,
         *,
         lesson_id: Optional[uuid.UUID] = None,
+        course_id: Optional[uuid.UUID] = None,
         client_ip: Optional[str] = None,
     ) -> PlaybackTokenResponse:
         """Issue an HMAC-signed, short-lived (2-hour TTL) HLS streaming playback token."""
@@ -690,7 +805,7 @@ class MediaService:
             )
 
         # Access Authorization check
-        self._check_media_access(session, asset, user, lesson_id=lesson_id)
+        self._check_media_access(session, asset, user, lesson_id=lesson_id, course_id=course_id)
 
         now = datetime.now(timezone.utc)
         ttl_minutes = self.settings.PLAYBACK_TOKEN_EXPIRE_MINUTES
@@ -700,6 +815,8 @@ class MediaService:
         token_payload = {
             "sub": str(user.id),
             "media_id": str(media_id),
+            "lesson_id": str(lesson_id) if lesson_id else None,
+            "course_id": str(course_id) if course_id else None,
             "ip": client_ip,
             "token_type": "playback",
             "iat": int(now.timestamp()),
@@ -726,6 +843,7 @@ class MediaService:
                 actor_type="USER",
                 metadata={
                     "lesson_id": str(lesson_id) if lesson_id else None,
+                    "course_id": str(course_id) if course_id else None,
                     "client_ip": client_ip,
                     "ttl_seconds": ttl_seconds,
                 },
@@ -741,6 +859,115 @@ class MediaService:
             expires_at=expires_at,
             ttl_seconds=ttl_seconds,
         )
+
+    def stream_hls_resource(
+        self,
+        session: Session,
+        media_id: uuid.UUID,
+        file_path: str,
+        *,
+        token: Optional[str] = None,
+        client_ip: Optional[str] = None,
+    ) -> Tuple[bytes, str, dict[str, str]]:
+        """Stream an authorized HLS resource (master playlist, variant playlist, or video segment).
+
+        Requirements (VM-03 D1-D4):
+        1. Token is strictly verified (valid signature, unexpired, matching media_id, matching IP).
+        2. Media asset must be in READY state and be a video.
+        3. File path is strictly checked against directory traversal (no .., no null bytes, extension whitelist).
+        4. Playlists (.m3u8) are dynamically rewritten to append token to all child playlist/segment lines.
+        5. Segments (.ts, .m4s) are streamed with appropriate binary headers and no-store caching.
+        """
+        if not token:
+            raise UnauthorizedException(
+                message="Video playback token is required to stream protected HLS assets.",
+                code="MISSING_TOKEN",
+            )
+
+        # 1. Verify token cryptographic integrity, expiration, and media binding
+        self.verify_playback_token(token, media_id, client_ip=client_ip)
+
+        # 2. Verify media asset exists, is video, and is READY
+        asset = self.repo.get_by_id(session, media_id)
+        if asset is None:
+            raise ResourceNotFoundException("MediaAsset", str(media_id))
+
+        if not asset.mime_type.startswith("video/"):
+            raise BadRequestException(
+                message="Target media asset is not a video file.",
+                code="NOT_A_VIDEO",
+            )
+
+        if asset.status != MEDIA_STATUS_READY:
+            raise BadRequestException(
+                message=f"Media asset is not ready for streaming (current status: {asset.status}).",
+                code="MEDIA_NOT_READY",
+            )
+
+        if not asset.transcode_output or not isinstance(asset.transcode_output, dict):
+            raise BadRequestException(
+                message="Media asset has no transcoded HLS output.",
+                code="HLS_OUTPUT_MISSING",
+            )
+
+        # 3. Path sanitization and traversal prevention
+        clean_path = file_path.strip().lstrip("/")
+        if not clean_path or ".." in clean_path or "\x00" in clean_path or "\\" in clean_path:
+            raise BadRequestException(
+                message="Invalid HLS resource path.",
+                code="INVALID_HLS_PATH",
+            )
+
+        # Extension whitelist: only .m3u8, .ts, .m4s permitted
+        ext = Path(clean_path).suffix.lower()
+        if ext not in (".m3u8", ".ts", ".m4s"):
+            raise BadRequestException(
+                message="Requested resource is not a valid HLS asset.",
+                code="INVALID_HLS_EXTENSION",
+            )
+
+        # 4. Fetch binary asset from storage
+        storage_key = f"media/{asset.id}/hls/{clean_path}"
+        try:
+            raw_bytes = self.storage_client.get_object(storage_key)
+        except KeyError:
+            raise ResourceNotFoundException("HlsResource", f"{asset.id}/{clean_path}")
+
+        # 5. Process playlists or segments
+        if ext == ".m3u8":
+            content_type = "application/vnd.apple.mpegurl"
+            try:
+                playlist_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                playlist_text = raw_bytes.decode("latin-1")
+
+            # Rewrite relative URI lines to propagate authorization token
+            rewritten_lines = []
+            for line in playlist_text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    delimiter = "&" if "?" in stripped else "?"
+                    rewritten_lines.append(f"{stripped}{delimiter}token={token}")
+                else:
+                    rewritten_lines.append(line)
+
+            output_bytes = "\n".join(rewritten_lines).encode("utf-8")
+        elif ext == ".ts":
+            content_type = "video/MP2T"
+            output_bytes = raw_bytes
+        else:
+            content_type = "video/iso.segment"
+            output_bytes = raw_bytes
+
+        headers = {
+            "Content-Type": content_type,
+            "Content-Length": str(len(output_bytes)),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store, max-age=0",
+            "Pragma": "no-cache",
+        }
+
+        return output_bytes, content_type, headers
 
     def verify_playback_token(
         self,
@@ -931,8 +1158,9 @@ class MediaService:
         asset: MediaAsset,
         user: User,
         lesson_id: Optional[uuid.UUID] = None,
+        course_id: Optional[uuid.UUID] = None,
     ) -> None:
-        """Verify caller is authorized to access protected media asset (Fail-Closed BUG-002).
+        """Verify caller is authorized to access protected media asset (Fail-Closed BUG-002, VM-03).
 
         Access Granted if:
         1. Caller account is active AND:
@@ -940,8 +1168,10 @@ class MediaService:
         3. For students:
            a. lesson_id context is strictly required.
            b. The asset is genuinely attached to the specified lesson.
-           c. If lesson is an authorized preview (is_preview=True), access is allowed.
-           d. Otherwise, active, unexpired course enrollment is strictly required.
+           c. If lesson is an authorized preview (is_preview=True), course revision must be published.
+           d. If course_id is provided, lesson must belong to that exact course.
+           e. Parent course must be published.
+           f. Otherwise, active, unexpired, unrevoked course enrollment is strictly required.
         """
         # 0. Validate account status (suspended users are always denied)
         if not user.is_active:
@@ -1006,20 +1236,37 @@ class MediaService:
             )
 
         # 5. Non-preview content requires verified active enrollment in parent course
-        course_id = (
+        parent_course_id = (
             session.query(CourseRevision.course_id)
             .join(CurriculumSection, CurriculumSection.course_revision_id == CourseRevision.id)
             .filter(CurriculumSection.id == lesson.section_id)
             .scalar()
         )
-        if not course_id:
+        if not parent_course_id:
             self._record_access_denied(session, asset, user, "INVALID_LESSON_STRUCTURE", lesson_id)
             raise ForbiddenException(
                 message="Lesson does not belong to a valid course revision.",
                 code="INVALID_LESSON_STRUCTURE",
             )
 
-        enrollment = self.enrollment_repo.get_by_student_and_course(session, user.id, course_id)
+        # Verify lesson belongs to requested course if course_id is provided
+        if course_id and str(parent_course_id) != str(course_id):
+            self._record_access_denied(session, asset, user, "COURSE_LESSON_MISMATCH", lesson_id)
+            raise ForbiddenException(
+                message="Lesson does not belong to the requested course.",
+                code="COURSE_LESSON_MISMATCH",
+            )
+
+        # Verify parent course is published
+        parent_course = session.get(Course, parent_course_id)
+        if not parent_course or parent_course.status != COURSE_STATUS_PUBLISHED:
+            self._record_access_denied(session, asset, user, "COURSE_NOT_PUBLISHED", lesson_id)
+            raise ForbiddenException(
+                message="Target course is not published.",
+                code="COURSE_NOT_PUBLISHED",
+            )
+
+        enrollment = self.enrollment_repo.get_by_student_and_course(session, user.id, parent_course_id)
         if not enrollment:
             self._record_access_denied(session, asset, user, "ENROLLMENT_REQUIRED", lesson_id)
             raise ForbiddenException(

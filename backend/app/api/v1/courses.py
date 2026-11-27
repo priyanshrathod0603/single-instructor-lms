@@ -15,10 +15,12 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
+    get_current_user,
     get_db,
     get_optional_current_user,
     require_permissions,
 )
+from app.core.exceptions import ForbiddenException, ResourceNotFoundException
 from app.core.permissions import (
     COURSE_ARCHIVE,
     COURSE_CREATE,
@@ -38,8 +40,10 @@ from app.schemas.course import (
     CourseCreateRequest,
     CourseDetailResponse,
     CourseListResponse,
+    CourseMetadataOptionsResponse,
     CourseRevisionCreateRequest,
     CourseRevisionResponse,
+    CourseSlugCheckResponse,
     CourseSummaryResponse,
     CourseUpdateRequest,
     CurriculumSectionResponse,
@@ -67,6 +71,9 @@ def get_course_service() -> CourseService:
 async def list_public_courses_endpoint(
     search: Optional[str] = Query(None, description="Search term for title or headline"),
     tag: Optional[str] = Query(None, description="Filter courses by tag"),
+    category: Optional[str] = Query(None, description="Filter courses by category"),
+    difficulty_level: Optional[str] = Query(None, description="Filter courses by difficulty level"),
+    language: Optional[str] = Query(None, description="Filter courses by language"),
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(20, ge=1, le=100, description="Items per page"),
     db: Session = Depends(get_db),
@@ -78,8 +85,52 @@ async def list_public_courses_endpoint(
         status=COURSE_STATUS_PUBLISHED,
         search=search,
         tag=tag,
+        category=category,
+        difficulty_level=difficulty_level,
+        language=language,
         page=page,
         per_page=per_page,
+    )
+
+
+@router.get(
+    "/metadata-options",
+    response_model=CourseMetadataOptionsResponse,
+    summary="List canonical course categories, difficulty levels, languages, and currencies",
+)
+def get_course_metadata_options_endpoint(
+    db: Session = Depends(get_db),
+    course_service: CourseService = Depends(get_course_service),
+) -> CourseMetadataOptionsResponse:
+    """Return selectable metadata options for course forms and catalog filters."""
+    return course_service.get_metadata_options(db)
+
+
+@router.get(
+    "/slug-available",
+    response_model=CourseSlugCheckResponse,
+    summary="Check whether a course slug is valid and available",
+)
+async def check_course_slug_availability_endpoint(
+    slug: str = Query(..., min_length=1, max_length=255, description="Candidate URL slug"),
+    exclude_course_id: Optional[uuid.UUID] = Query(None, description="Optional current course UUID during edit"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    course_service: CourseService = Depends(get_course_service),
+) -> CourseSlugCheckResponse:
+    """Verify slug format and uniqueness for instructors/admins creating or editing a course."""
+    if not (
+        current_user.has_permission(COURSE_CREATE)
+        or current_user.has_permission(COURSE_EDIT)
+    ):
+        raise ForbiddenException(
+            message="Course creation or editing permissions required.",
+            code="PERMISSION_DENIED",
+        )
+    return await course_service.check_slug_availability(
+        db,
+        slug,
+        exclude_course_id=exclude_course_id,
     )
 
 
@@ -92,6 +143,9 @@ async def list_all_courses_endpoint(
     status_filter: Optional[str] = Query(None, alias="status", description="Filter by status (DRAFT, PUBLISHED, ARCHIVED)"),
     search: Optional[str] = Query(None, description="Search query"),
     tag: Optional[str] = Query(None, description="Tag filter"),
+    category: Optional[str] = Query(None, description="Category filter"),
+    difficulty_level: Optional[str] = Query(None, description="Difficulty filter"),
+    language: Optional[str] = Query(None, description="Language filter"),
     page: int = Query(1, ge=1, description="Page number"),
     per_page: int = Query(20, ge=1, le=100, description="Items per page"),
     db: Session = Depends(get_db),
@@ -104,6 +158,9 @@ async def list_all_courses_endpoint(
         status=status_filter,
         search=search,
         tag=tag,
+        category=category,
+        difficulty_level=difficulty_level,
+        language=language,
         page=page,
         per_page=per_page,
     )
@@ -111,7 +168,7 @@ async def list_all_courses_endpoint(
 
 @router.post(
     "",
-    response_model=CourseSummaryResponse,
+    response_model=CourseDetailResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create new course entity and initial draft revision",
 )
@@ -121,12 +178,12 @@ async def create_course_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permissions(COURSE_CREATE)),
     course_service: CourseService = Depends(get_course_service),
-) -> CourseSummaryResponse:
+) -> CourseDetailResponse:
     """Create a new course container and initialize Draft Revision 1. Requires course:create."""
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")
 
-    course, _ = await course_service.create_course(
+    course, initial_revision = await course_service.create_course(
         db,
         data,
         actor_id=current_user.id,
@@ -134,19 +191,11 @@ async def create_course_endpoint(
         user_agent=ua,
     )
 
-    return CourseSummaryResponse(
-        id=course.id,
-        slug=course.slug,
-        title=course.title,
-        headline=course.headline,
-        thumbnail_url=course.thumbnail_url,
-        status=course.status,
-        price_inr=course.price_inr,
-        is_free=course.is_free,
-        tags=[t.tag for t in course.tags],
-        live_revision_id=course.live_revision_id,
-        created_at=course.created_at,
-        updated_at=course.updated_at,
+    return course_service._build_course_detail(
+        course,
+        [],
+        draft_revision_id=initial_revision.id,
+        latest_revision_id=initial_revision.id,
     )
 
 
@@ -174,7 +223,7 @@ async def get_course_detail_endpoint(
 
 @router.patch(
     "/{id}",
-    response_model=CourseSummaryResponse,
+    response_model=CourseDetailResponse,
     summary="Update top-level course metadata",
 )
 async def update_course_endpoint(
@@ -184,7 +233,7 @@ async def update_course_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permissions(COURSE_EDIT)),
     course_service: CourseService = Depends(get_course_service),
-) -> CourseSummaryResponse:
+) -> CourseDetailResponse:
     """Update top-level course container metadata (slug, title, pricing, tags). Requires course:edit."""
     ip = request.client.host if request.client else None
     ua = request.headers.get("user-agent")

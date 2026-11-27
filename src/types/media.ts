@@ -11,6 +11,16 @@ export const SUPPORTED_VIDEO_MIME_TYPES = [
 
 export type SupportedVideoMimeType = (typeof SUPPORTED_VIDEO_MIME_TYPES)[number];
 
+export const SUPPORTED_IMAGE_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+] as const;
+
+export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
+
+export const MAX_IMAGE_UPLOAD_BYTES = 5 * 1024 * 1024;
+
 export interface PlaybackTokenRequest {
   lesson_id?: string | null;
   course_id?: string | null;
@@ -34,6 +44,7 @@ export interface MediaAssetResponse {
   file_size_bytes: number;
   status: "UPLOADING" | "UPLOADED" | "PROCESSING" | "READY" | "FAILED" | string;
   transcode_output?: Record<string, unknown> | null;
+  public_url?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -12,9 +12,16 @@ htmlcov/
 
 # Environment Variables & Secrets
 .env
+.env.*
+!.env.example
+!.env.local.example
 .env.local
 .env.*.local
-!.env.example
+
+# Keys & Certificates
+*.pem
+*.key
+*.p12
 
 # macOS System Files
 .DS_Store
@@ -25,8 +32,11 @@ htmlcov/
 venv/
 .venv/
 env/
-.env/
 ENV/
+
+# Testing & Coverage Reports
+coverage/
+nyc_output/
 
 # Database files
 *.sqlite
@@ -48,3 +58,7 @@ tsconfig.tsbuildinfo
 # Logs
 *.log
 logs/
+
+# Local non-production media storage
+.local_storage/
+backend/.local_storage/

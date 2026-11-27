@@ -33,7 +33,29 @@ from app.repositories.audit_repo import AuditRepository
 # Default allowed attribute names per resource domain to prevent unrestricted state dumping
 DEFAULT_ALLOWLISTED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
     "user": frozenset({"id", "email", "full_name", "phone", "role", "roles", "is_active", "is_verified", "created_at"}),
-    "course": frozenset({"id", "slug", "title", "headline", "status", "price_inr", "is_free", "live_revision_id", "reason"}),
+    "course": frozenset(
+        {
+            "id",
+            "slug",
+            "title",
+            "headline",
+            "thumbnail_url",
+            "thumbnail_media_id",
+            "category",
+            "difficulty_level",
+            "language",
+            "learning_outcomes",
+            "requirements",
+            "tags",
+            "status",
+            "price_inr",
+            "compare_at_price_inr",
+            "currency",
+            "is_free",
+            "live_revision_id",
+            "reason",
+        }
+    ),
     "course_revision": frozenset({"id", "course_id", "revision_no", "status", "published_at"}),
     "enrollment": frozenset({"id", "student_id", "course_id", "order_id", "status", "granted_at", "expires_at"}),
     "order": frozenset({"id", "order_no", "student_id", "course_id", "amount_inr", "currency", "status"}),

@@ -187,6 +187,27 @@ async def list_media_assets_endpoint(
 
 
 @router.get(
+    "/public/{id}",
+    summary="Serve verified ready public image asset (thumbnails)",
+)
+def get_public_image_endpoint(
+    id: uuid.UUID,
+    db: Session = Depends(get_db),
+    media_service: MediaService = Depends(get_media_service),
+) -> Response:
+    """Serve strictly verified public-images READY assets with nosniff headers."""
+    data, mime_type = media_service.get_public_image(db, id)
+    return Response(
+        content=data,
+        media_type=mime_type,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
+@router.get(
     "/{id}",
     response_model=MediaAssetResponse,
     summary="Retrieve media asset details",
@@ -221,13 +242,49 @@ def generate_playback_token_endpoint(
     """
     client_ip = get_trusted_client_ip(request)
     lesson_id = payload.lesson_id if payload else None
+    course_id = payload.course_id if payload else None
 
     return media_service.generate_playback_token(
         db,
         id,
         current_user,
         lesson_id=lesson_id,
+        course_id=course_id,
         client_ip=client_ip,
+    )
+
+
+@router.get(
+    "/{id}/hls/{file_path:path}",
+    summary="Stream protected HLS master playlist, variants, or video segments",
+    response_class=Response,
+)
+def stream_hls_resource_endpoint(
+    id: uuid.UUID,
+    file_path: str,
+    request: Request,
+    token: Optional[str] = Query(None, description="Playback authorization token"),
+    db: Session = Depends(get_db),
+    media_service: MediaService = Depends(get_media_service),
+) -> Response:
+    """Stream protected HLS playlists and segments with cryptographic token verification."""
+    token_str = token or (
+        request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+        if request.headers.get("Authorization")
+        else None
+    )
+    client_ip = get_trusted_client_ip(request)
+    data, content_type, headers = media_service.stream_hls_resource(
+        db,
+        id,
+        file_path,
+        token=token_str,
+        client_ip=client_ip,
+    )
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers=headers,
     )
 
 
@@ -316,3 +373,63 @@ def verify_playback_token_endpoint(
     client_ip = get_trusted_client_ip(request)
     claims = media_service.verify_playback_token(token_str, id, client_ip=client_ip)
     return {"valid": True, "claims": claims}
+
+
+@router.put(
+    "/storage/upload/{file_key:path}",
+    summary="Local storage upload receiver for presigned PUT URLs in non-production",
+    status_code=status.HTTP_200_OK,
+)
+async def local_storage_upload_endpoint(
+    file_key: str,
+    request: Request,
+) -> Response:
+    """Accept binary upload and persist into StorageClient in non-production environments."""
+    from app.core.config import get_settings
+    from app.core.storage import StorageClient
+
+    settings = get_settings()
+    if settings.is_production:
+        raise ForbiddenException(
+            message="Local storage upload is prohibited in production.",
+            code="PRODUCTION_GUARD",
+        )
+
+    body = await request.body()
+    content_type = request.headers.get("content-type") or "application/octet-stream"
+
+    client = StorageClient(settings)
+    client.put_object(file_key, body, content_type=content_type)
+    return Response(status_code=status.HTTP_200_OK)
+
+
+@router.get(
+    "/storage/download/{file_key:path}",
+    summary="Local storage download endpoint for presigned GET URLs in non-production",
+)
+async def local_storage_download_endpoint(
+    file_key: str,
+) -> Response:
+    """Serve binary storage object in non-production environments."""
+    from app.core.config import get_settings
+    from app.core.storage import StorageClient
+
+    settings = get_settings()
+    if settings.is_production:
+        raise ForbiddenException(
+            message="Local storage download is prohibited in production.",
+            code="PRODUCTION_GUARD",
+        )
+
+    client = StorageClient(settings)
+    if not client.object_exists(file_key):
+        raise ResourceNotFoundException(
+            message=f"Storage object not found: {file_key}",
+            code="OBJECT_NOT_FOUND",
+        )
+
+    data = client.get_object(file_key)
+    meta = client.head_object(file_key) or {}
+    content_type = meta.get("content_type", "application/octet-stream")
+
+    return Response(content=data, media_type=content_type)

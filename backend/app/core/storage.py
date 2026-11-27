@@ -15,8 +15,11 @@ Features:
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import json
 import logging
+import os
 from pathlib import Path
+import sys
 from typing import Any, Optional, Tuple
 import urllib.error
 import urllib.parse
@@ -60,8 +63,73 @@ class StorageClient:
             else "mock-secret-key"
         )
         self._in_memory_storage = _shared_in_memory_storage
+        self._local_storage_dir = Path(__file__).resolve().parents[2] / ".local_storage"
 
-    def _get_endpoint_and_uri(self, file_key: str) -> Tuple[str, str, str]:
+    def _should_persist_local_disk(self) -> bool:
+        """Persist local non-production objects to disk outside automated pytest runs."""
+        if self.is_remote_configured or self.settings.is_production:
+            return False
+        if self.settings.ENVIRONMENT.lower() == "test":
+            return False
+        if "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST"):
+            return False
+        return True
+
+    def _resolve_local_paths(self, file_key: str) -> Tuple[Path, Path]:
+        """Resolve local object & metadata paths with strict containment guard."""
+        clean_key = file_key.lstrip("/")
+        if not clean_key or ".." in Path(clean_key).parts:
+            raise ValueError(f"Invalid storage key path: {file_key}")
+        base_dir = self._local_storage_dir.resolve()
+        obj_path = (base_dir / clean_key).resolve()
+        if base_dir != obj_path and base_dir not in obj_path.parents:
+            raise ValueError(f"Storage key escapes local directory: {file_key}")
+        meta_path = Path(f"{obj_path}.meta.json")
+        return obj_path, meta_path
+
+    def _write_local_disk_object(self, file_key: str, data: bytes, content_type: str) -> None:
+        if not self._should_persist_local_disk():
+            return
+        obj_path, meta_path = self._resolve_local_paths(file_key)
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+        obj_path.write_bytes(data)
+        meta_path.write_text(json.dumps({"content_type": content_type}), encoding="utf-8")
+
+    def _read_local_disk_object(self, file_key: str) -> Optional[Tuple[bytes, str]]:
+        if not self._should_persist_local_disk():
+            return None
+        try:
+            obj_path, meta_path = self._resolve_local_paths(file_key)
+        except ValueError:
+            return None
+        if not obj_path.is_file():
+            return None
+        content_type = "application/octet-stream"
+        if meta_path.is_file():
+            try:
+                content_type = json.loads(meta_path.read_text(encoding="utf-8")).get("content_type", content_type)
+            except Exception:
+                pass
+        data = obj_path.read_bytes()
+        self._in_memory_storage[file_key] = (data, content_type)
+        return data, content_type
+
+    def _delete_local_disk_object(self, file_key: str) -> bool:
+        if not self._should_persist_local_disk():
+            return False
+        try:
+            obj_path, meta_path = self._resolve_local_paths(file_key)
+        except ValueError:
+            return False
+        removed = False
+        if obj_path.is_file():
+            obj_path.unlink()
+            removed = True
+        if meta_path.is_file():
+            meta_path.unlink()
+        return removed
+
+    def _get_endpoint_and_uri(self, file_key: str, for_upload: bool = True) -> Tuple[str, str, str]:
         """Compute host, canonical URI, and base URL supporting both path and virtual-host styles.
 
         Returns:
@@ -83,6 +151,14 @@ class StorageClient:
                 # Path style: bucket is part of URL path (e.g. http://localhost:9000/mybucket/key)
                 canonical_uri = f"/{self.bucket}/{quoted_key}"
                 base_url = f"{clean_endpoint}/{self.bucket}/{quoted_key}"
+        elif not self.is_remote_configured and not self.settings.is_production:
+            backend_url = (self.settings.BACKEND_URL or "http://localhost:8000").rstrip("/")
+            api_prefix = self.settings.API_V1_STR.rstrip("/")
+            parsed = urllib.parse.urlparse(backend_url)
+            host = parsed.netloc or "localhost:8000"
+            subpath = "upload" if for_upload else "download"
+            canonical_uri = f"{api_prefix}/media/storage/{subpath}/{quoted_key}"
+            base_url = f"{backend_url}{api_prefix}/media/storage/{subpath}/{quoted_key}"
         else:
             # Default AWS S3 virtual-hosted style
             host = f"{self.bucket}.s3.{self.region}.amazonaws.com"
@@ -116,7 +192,7 @@ class StorageClient:
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
         date_stamp = now.strftime("%Y%m%d")
 
-        host, canonical_uri, base_url = self._get_endpoint_and_uri(file_key)
+        host, canonical_uri, base_url = self._get_endpoint_and_uri(file_key, for_upload=True)
 
         credential_scope = f"{date_stamp}/{self.region}/s3/aws4_request"
         signed_headers = "content-type;host"
@@ -171,7 +247,7 @@ class StorageClient:
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
         date_stamp = now.strftime("%Y%m%d")
 
-        host, canonical_uri, base_url = self._get_endpoint_and_uri(file_key)
+        host, canonical_uri, base_url = self._get_endpoint_and_uri(file_key, for_upload=False)
 
         credential_scope = f"{date_stamp}/{self.region}/s3/aws4_request"
         signed_headers = "host"
@@ -227,7 +303,7 @@ class StorageClient:
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
         date_stamp = now.strftime("%Y%m%d")
 
-        host, canonical_uri, url = self._get_endpoint_and_uri(file_key)
+        host, canonical_uri, url = self._get_endpoint_and_uri(file_key, for_upload=(method.upper() in ("PUT", "POST")))
 
         payload_bytes = data or b""
         payload_hash = hashlib.sha256(payload_bytes).hexdigest()
@@ -300,9 +376,18 @@ class StorageClient:
         if self.settings.is_production:
             raise RuntimeError("Remote storage credentials are required in production; in-memory fallback is prohibited.")
 
-        # In-memory storage check for non-production environments
+        # In-memory / local-dev disk storage check for non-production environments
         if file_key in self._in_memory_storage:
             data, content_type = self._in_memory_storage[file_key]
+            return {
+                "exists": True,
+                "size": len(data),
+                "content_type": content_type,
+                "etag": hashlib.md5(data).hexdigest(),
+            }
+        disk_obj = self._read_local_disk_object(file_key)
+        if disk_obj is not None:
+            data, content_type = disk_obj
             return {
                 "exists": True,
                 "size": len(data),
@@ -328,6 +413,7 @@ class StorageClient:
             raise RuntimeError("Remote storage credentials are required in production; in-memory fallback is prohibited.")
 
         self._in_memory_storage[file_key] = (data, content_type)
+        self._write_local_disk_object(file_key, data, content_type)
 
     def get_object(self, file_key: str) -> bytes:
         """Retrieve binary object bytes from storage without fallback to sample data."""
@@ -342,6 +428,10 @@ class StorageClient:
 
         if file_key in self._in_memory_storage:
             return self._in_memory_storage[file_key][0]
+
+        disk_obj = self._read_local_disk_object(file_key)
+        if disk_obj is not None:
+            return disk_obj[0]
 
         raise KeyError(f"Storage object not found: {file_key}")
 
@@ -364,6 +454,9 @@ class StorageClient:
             raise KeyError("Remote storage credentials are required in production.")
         if file_key in self._in_memory_storage:
             return self._in_memory_storage[file_key][0][:length]
+        disk_obj = self._read_local_disk_object(file_key)
+        if disk_obj is not None:
+            return disk_obj[0][:length]
         raise KeyError(f"Storage object not found: {file_key}")
 
     def delete_object(self, file_key: str) -> bool:
@@ -375,10 +468,13 @@ class StorageClient:
         if self.settings.is_production:
             raise RuntimeError("Remote storage credentials are required in production; in-memory fallback is prohibited.")
 
+        removed = False
         if file_key in self._in_memory_storage:
             del self._in_memory_storage[file_key]
-            return True
-        return False
+            removed = True
+        if self._delete_local_disk_object(file_key):
+            removed = True
+        return removed
 
     def download_file(self, file_key: str, destination_path: Path) -> None:
         """Download binary object from storage directly to destination file on disk."""
@@ -396,6 +492,11 @@ class StorageClient:
         if file_key in self._in_memory_storage:
             data, _ = self._in_memory_storage[file_key]
             destination_path.write_bytes(data)
+            return
+
+        disk_obj = self._read_local_disk_object(file_key)
+        if disk_obj is not None:
+            destination_path.write_bytes(disk_obj[0])
             return
 
         raise KeyError(f"Storage object not found: {file_key}")

@@ -130,10 +130,10 @@ export interface RubricScoreInput {
 
 export interface GradeSubmissionPayload {
   scores: RubricScoreInput[];
-  feedback?: string | null;
+  overall_feedback?: string | null;
 }
 
 export interface OverrideGradePayload {
-  overridden_score: number;
+  new_score: number;
   reason: string;
 }

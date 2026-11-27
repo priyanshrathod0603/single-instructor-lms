@@ -10,15 +10,25 @@ Architecture Specifications:
 from datetime import datetime
 import re
 from typing import Any, List, Optional
+import urllib.parse
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.course import (
     COURSE_STATUS_ARCHIVED,
     COURSE_STATUS_DRAFT,
     COURSE_STATUS_PUBLISHED,
+    DEFAULT_COURSE_CATEGORIES,
+    DEFAULT_COURSE_LANGUAGES,
+    DEFAULT_CURRENCY_INR,
+    DIFFICULTY_ADVANCED,
+    DIFFICULTY_ALL_LEVELS,
+    DIFFICULTY_BEGINNER,
+    DIFFICULTY_INTERMEDIATE,
+    DIFFICULTY_LEVEL_LABELS,
     VALID_COURSE_STATUSES,
+    VALID_DIFFICULTY_LEVELS,
     VALID_REVISION_STATUSES,
 )
 from app.models.curriculum import (
@@ -29,6 +39,115 @@ from app.models.curriculum import (
 )
 
 SLUG_REGEX = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_DANGEROUS_BLOCK_RE = re.compile(
+    r"<\s*(script|style|iframe|object|embed)\b[^>]*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_RE = re.compile(r"<\s*/?\s*[a-zA-Z!/?][^>]*>")
+_DANGEROUS_URI_RE = re.compile(r"(javascript:|vbscript:|data\s*:\s*text/html)", re.IGNORECASE)
+
+_DIFFICULTY_INPUT_MAP: dict[str, str] = {
+    "beginner": DIFFICULTY_BEGINNER,
+    "intermediate": DIFFICULTY_INTERMEDIATE,
+    "advanced": DIFFICULTY_ADVANCED,
+    "all levels": DIFFICULTY_ALL_LEVELS,
+    "all_levels": DIFFICULTY_ALL_LEVELS,
+    "all-levels": DIFFICULTY_ALL_LEVELS,
+}
+
+
+def sanitize_plain_text(
+    value: Optional[str],
+    *,
+    preserve_newlines: bool = True,
+    max_length: Optional[int] = None,
+) -> Optional[str]:
+    """Strip unsafe HTML/script tags and control characters from text inputs."""
+    if value is None:
+        return None
+    cleaned = _CONTROL_CHARS_RE.sub("", value)
+    cleaned = _DANGEROUS_BLOCK_RE.sub("", cleaned)
+    cleaned = _HTML_TAG_RE.sub("", cleaned)
+    cleaned = _DANGEROUS_URI_RE.sub("", cleaned)
+    if preserve_newlines:
+        cleaned = "\n".join(line.rstrip() for line in cleaned.splitlines()).strip()
+    else:
+        cleaned = " ".join(cleaned.split())
+    if max_length is not None and len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].rstrip()
+    return cleaned
+
+
+def normalize_difficulty_level(value: Optional[str]) -> Optional[str]:
+    """Normalize display labels or canonical codes to stored difficulty constant."""
+    if value is None:
+        return None
+    cleaned = " ".join(value.strip().lower().split())
+    if cleaned in _DIFFICULTY_INPUT_MAP:
+        return _DIFFICULTY_INPUT_MAP[cleaned]
+    upper = cleaned.upper()
+    if upper in VALID_DIFFICULTY_LEVELS:
+        return upper
+    raise ValueError(
+        "Difficulty level must be one of: Beginner, Intermediate, Advanced, All Levels"
+    )
+
+
+def validate_safe_thumbnail_url(value: Optional[str]) -> Optional[str]:
+    """Allow safe HTTP(S) URLs or canonical /api/v1/media/public/<uuid> paths."""
+    if value is None:
+        return None
+    cleaned = _CONTROL_CHARS_RE.sub("", value).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 512:
+        raise ValueError("Thumbnail URL must be 512 characters or fewer")
+    if any(ch.isspace() for ch in cleaned):
+        raise ValueError("Thumbnail URL cannot contain whitespace")
+    lower = cleaned.lower()
+    if lower.startswith(("javascript:", "vbscript:", "data:")):
+        raise ValueError("Thumbnail URL uses a prohibited scheme")
+    if cleaned.startswith("/api/v1/media/public/"):
+        return cleaned
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(
+            "Thumbnail URL must be a valid http(s) URL or uploaded media image path"
+        )
+    return cleaned
+
+
+def normalize_string_list(
+    values: Optional[List[str]],
+    *,
+    field_label: str,
+    lowercase: bool = False,
+    max_items: int = 30,
+    max_item_length: int = 240,
+) -> List[str]:
+    """Validate, sanitize, trim, and deduplicate ordered string arrays."""
+    if values is None:
+        return []
+    if len(values) > max_items:
+        raise ValueError(f"{field_label} cannot contain more than {max_items} items")
+    normalized: List[str] = []
+    seen_lower: set[str] = set()
+    for raw in values:
+        item = sanitize_plain_text(raw, preserve_newlines=False) or ""
+        if not item:
+            raise ValueError(f"{field_label} items cannot be empty")
+        if len(item) > max_item_length:
+            raise ValueError(
+                f"Each {field_label.lower()} item must be {max_item_length} characters or fewer"
+            )
+        if lowercase:
+            item = item.lower()
+        key = item.lower()
+        if key not in seen_lower:
+            seen_lower.add(key)
+            normalized.append(item)
+    return normalized
 
 
 def slugify(text: str) -> str:
@@ -46,21 +165,35 @@ def slugify(text: str) -> str:
 
 class CourseCreateRequest(BaseModel):
     """Payload for creating a new course entity and initial draft revision."""
-    title: str = Field(..., min_length=1, max_length=255, description="Course title")
-    slug: Optional[str] = Field(None, max_length=255, description="Unique slug; generated if omitted")
+    title: str = Field(..., min_length=3, max_length=255, description="Course title (3-255 chars)")
+    slug: Optional[str] = Field(None, max_length=255, description="Unique URL-safe slug; generated if omitted")
     headline: Optional[str] = Field(None, max_length=512, description="Short marketing tagline")
-    description: Optional[str] = Field(None, description="Detailed course description")
+    description: Optional[str] = Field(None, max_length=20000, description="Detailed course description")
     thumbnail_url: Optional[str] = Field(None, max_length=512, description="Course card thumbnail image URL")
-    price_inr: int = Field(default=0, ge=0, description="Price in paise (e.g. 499900 for ₹4,999.00)")
+    thumbnail_media_id: Optional[uuid.UUID] = Field(None, description="Verified MediaAsset UUID for uploaded thumbnail")
+    category: str = Field(default="General", min_length=1, max_length=64, description="Course category")
+    difficulty_level: str = Field(default="ALL_LEVELS", description="Difficulty: Beginner, Intermediate, Advanced, All Levels")
+    language: str = Field(default="English", min_length=1, max_length=32, description="Course instruction language")
+    learning_outcomes: List[str] = Field(default_factory=list, description="Ordered learning outcomes")
+    requirements: List[str] = Field(default_factory=list, description="Ordered course prerequisites")
+    price_inr: int = Field(default=0, ge=0, description="Effective selling price in paise (e.g. 499900 for ₹4,999.00)")
+    compare_at_price_inr: Optional[int] = Field(
+        None,
+        gt=0,
+        description="Optional higher regular price in paise when a discount is applied",
+    )
+    currency: str = Field(default="INR", min_length=3, max_length=3, description="ISO currency code (INR)")
     is_free: bool = Field(default=False, description="Whether the course is free of charge")
-    tags: Optional[List[str]] = Field(default_factory=list, description="Categorization tags")
+    tags: List[str] = Field(default_factory=list, description="Categorization tags")
 
     @field_validator("title")
     @classmethod
     def validate_title(cls, v: str) -> str:
-        cleaned = v.strip()
-        if not cleaned:
-            raise ValueError("Course title cannot be empty or whitespace only")
+        cleaned = sanitize_plain_text(v, preserve_newlines=False) or ""
+        if len(cleaned) < 3:
+            raise ValueError("Course title must be at least 3 characters")
+        if len(cleaned) > 255:
+            raise ValueError("Course title must be 255 characters or fewer")
         return cleaned
 
     @field_validator("slug")
@@ -73,15 +206,108 @@ class CourseCreateRequest(BaseModel):
             raise ValueError("Slug must be lowercase alphanumeric with hyphens (e.g. 'deep-learning-mastery')")
         return cleaned
 
+    @field_validator("headline")
+    @classmethod
+    def validate_headline(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = sanitize_plain_text(v, preserve_newlines=False, max_length=512)
+        return cleaned
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return sanitize_plain_text(v, preserve_newlines=True, max_length=20000)
+
+    @field_validator("thumbnail_url")
+    @classmethod
+    def validate_thumbnail(cls, v: Optional[str]) -> Optional[str]:
+        return validate_safe_thumbnail_url(v)
+
+    @field_validator("category")
+    @classmethod
+    def validate_category(cls, v: str) -> str:
+        cleaned = sanitize_plain_text(v, preserve_newlines=False) or ""
+        if not cleaned:
+            raise ValueError("Category cannot be empty")
+        if len(cleaned) > 64:
+            raise ValueError("Category must be 64 characters or fewer")
+        return cleaned
+
+    @field_validator("difficulty_level")
+    @classmethod
+    def validate_difficulty(cls, v: str) -> str:
+        return normalize_difficulty_level(v) or DIFFICULTY_ALL_LEVELS
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, v: str) -> str:
+        cleaned = sanitize_plain_text(v, preserve_newlines=False) or ""
+        if not cleaned:
+            raise ValueError("Language cannot be empty")
+        if len(cleaned) > 32:
+            raise ValueError("Language must be 32 characters or fewer")
+        return cleaned
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, v: str) -> str:
+        cleaned = v.strip().upper()
+        if cleaned != DEFAULT_CURRENCY_INR:
+            raise ValueError("Currency must be INR")
+        return cleaned
+
+    @field_validator("learning_outcomes")
+    @classmethod
+    def validate_learning_outcomes(cls, v: List[str]) -> List[str]:
+        return normalize_string_list(v, field_label="Learning outcome", max_items=30, max_item_length=240)
+
+    @field_validator("requirements")
+    @classmethod
+    def validate_requirements(cls, v: List[str]) -> List[str]:
+        return normalize_string_list(v, field_label="Requirement", max_items=30, max_item_length=240)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: List[str]) -> List[str]:
+        return normalize_string_list(v, field_label="Tag", lowercase=True, max_items=20, max_item_length=64)
+
+    @model_validator(mode="after")
+    def validate_pricing_invariants(self) -> "CourseCreateRequest":
+        if self.is_free:
+            if self.price_inr != 0:
+                raise ValueError("Free courses must have price_inr equal to 0")
+            if self.compare_at_price_inr is not None:
+                raise ValueError("Free courses cannot set a regular/compare-at price")
+        else:
+            if self.price_inr <= 0:
+                raise ValueError("Paid courses must have a selling price greater than 0 INR")
+            if self.compare_at_price_inr is not None:
+                if self.compare_at_price_inr < self.price_inr:
+                    raise ValueError("Discounted selling price cannot exceed regular price")
+                if self.compare_at_price_inr == self.price_inr:
+                    self.compare_at_price_inr = None
+        return self
+
 
 class CourseUpdateRequest(BaseModel):
     """Payload for updating top-level course container metadata."""
-    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    title: Optional[str] = Field(None, min_length=3, max_length=255)
     slug: Optional[str] = Field(None, max_length=255)
     headline: Optional[str] = Field(None, max_length=512)
-    description: Optional[str] = None
+    description: Optional[str] = Field(None, max_length=20000)
     thumbnail_url: Optional[str] = Field(None, max_length=512)
+    thumbnail_media_id: Optional[uuid.UUID] = None
+    category: Optional[str] = Field(None, min_length=1, max_length=64)
+    difficulty_level: Optional[str] = None
+    language: Optional[str] = Field(None, min_length=1, max_length=32)
+    learning_outcomes: Optional[List[str]] = None
+    requirements: Optional[List[str]] = None
     price_inr: Optional[int] = Field(None, ge=0)
+    compare_at_price_inr: Optional[int] = Field(None, gt=0)
+    currency: Optional[str] = Field(None, min_length=3, max_length=3)
     is_free: Optional[bool] = None
     tags: Optional[List[str]] = None
 
@@ -90,9 +316,11 @@ class CourseUpdateRequest(BaseModel):
     def validate_title(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return None
-        cleaned = v.strip()
-        if not cleaned:
-            raise ValueError("Course title cannot be empty")
+        cleaned = sanitize_plain_text(v, preserve_newlines=False) or ""
+        if len(cleaned) < 3:
+            raise ValueError("Course title must be at least 3 characters")
+        if len(cleaned) > 255:
+            raise ValueError("Course title must be 255 characters or fewer")
         return cleaned
 
     @field_validator("slug")
@@ -104,6 +332,100 @@ class CourseUpdateRequest(BaseModel):
         if not cleaned or not SLUG_REGEX.match(cleaned):
             raise ValueError("Slug must be lowercase alphanumeric with hyphens")
         return cleaned
+
+    @field_validator("headline")
+    @classmethod
+    def validate_headline(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return sanitize_plain_text(v, preserve_newlines=False, max_length=512)
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        return sanitize_plain_text(v, preserve_newlines=True, max_length=20000)
+
+    @field_validator("thumbnail_url")
+    @classmethod
+    def validate_thumbnail(cls, v: Optional[str]) -> Optional[str]:
+        return validate_safe_thumbnail_url(v)
+
+    @field_validator("category")
+    @classmethod
+    def validate_category(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = sanitize_plain_text(v, preserve_newlines=False) or ""
+        if not cleaned:
+            raise ValueError("Category cannot be empty")
+        if len(cleaned) > 64:
+            raise ValueError("Category must be 64 characters or fewer")
+        return cleaned
+
+    @field_validator("difficulty_level")
+    @classmethod
+    def validate_difficulty(cls, v: Optional[str]) -> Optional[str]:
+        return normalize_difficulty_level(v)
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = sanitize_plain_text(v, preserve_newlines=False) or ""
+        if not cleaned:
+            raise ValueError("Language cannot be empty")
+        if len(cleaned) > 32:
+            raise ValueError("Language must be 32 characters or fewer")
+        return cleaned
+
+    @field_validator("currency")
+    @classmethod
+    def validate_currency(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip().upper()
+        if cleaned != DEFAULT_CURRENCY_INR:
+            raise ValueError("Currency must be INR")
+        return cleaned
+
+    @field_validator("learning_outcomes")
+    @classmethod
+    def validate_learning_outcomes(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        return normalize_string_list(v, field_label="Learning outcome", max_items=30, max_item_length=240)
+
+    @field_validator("requirements")
+    @classmethod
+    def validate_requirements(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        return normalize_string_list(v, field_label="Requirement", max_items=30, max_item_length=240)
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        return normalize_string_list(v, field_label="Tag", lowercase=True, max_items=20, max_item_length=64)
+
+    @model_validator(mode="after")
+    def validate_partial_pricing(self) -> "CourseUpdateRequest":
+        if self.is_free is True:
+            if self.price_inr is not None and self.price_inr != 0:
+                raise ValueError("Free courses must have price_inr equal to 0")
+            if self.compare_at_price_inr is not None:
+                raise ValueError("Free courses cannot set a regular/compare-at price")
+        if (
+            self.price_inr is not None
+            and self.compare_at_price_inr is not None
+            and self.compare_at_price_inr < self.price_inr
+        ):
+            raise ValueError("Discounted selling price cannot exceed regular price")
+        return self
 
 
 # ============================================================================
@@ -304,11 +626,20 @@ class CourseSummaryResponse(BaseModel):
     title: str
     headline: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    thumbnail_media_id: Optional[uuid.UUID] = None
+    category: str = "General"
+    difficulty_level: str = "ALL_LEVELS"
+    language: str = "English"
     status: str
     price_inr: int
+    compare_at_price_inr: Optional[int] = None
+    currency: str = "INR"
+    discount_percentage: Optional[int] = None
     is_free: bool
     tags: List[str] = Field(default_factory=list)
     live_revision_id: Optional[uuid.UUID] = None
+    draft_revision_id: Optional[uuid.UUID] = None
+    latest_revision_id: Optional[uuid.UUID] = None
     created_at: datetime
     updated_at: datetime
 
@@ -323,14 +654,50 @@ class CourseDetailResponse(BaseModel):
     headline: Optional[str] = None
     description: Optional[str] = None
     thumbnail_url: Optional[str] = None
+    thumbnail_media_id: Optional[uuid.UUID] = None
+    category: str = "General"
+    difficulty_level: str = "ALL_LEVELS"
+    language: str = "English"
+    learning_outcomes: List[str] = Field(default_factory=list)
+    requirements: List[str] = Field(default_factory=list)
     status: str
     price_inr: int
+    compare_at_price_inr: Optional[int] = None
+    currency: str = "INR"
+    discount_percentage: Optional[int] = None
     is_free: bool
     tags: List[str] = Field(default_factory=list)
     live_revision_id: Optional[uuid.UUID] = None
+    draft_revision_id: Optional[uuid.UUID] = None
+    latest_revision_id: Optional[uuid.UUID] = None
     created_at: datetime
     updated_at: datetime
     curriculum: List[CurriculumSectionResponse] = Field(default_factory=list)
+
+
+class CourseSlugCheckResponse(BaseModel):
+    """Slug uniqueness verification response for real-time form validation."""
+    slug: str
+    available: bool
+    reason: Optional[str] = None
+
+
+class CourseMetadataOptionItem(BaseModel):
+    value: str
+    label: str
+
+
+class CourseMetadataOptionsResponse(BaseModel):
+    """Canonical metadata taxonomy options returned to admin forms & catalog filters."""
+    categories: List[str] = Field(default_factory=lambda: list(DEFAULT_COURSE_CATEGORIES))
+    difficulty_levels: List[CourseMetadataOptionItem] = Field(
+        default_factory=lambda: [
+            CourseMetadataOptionItem(value=k, label=v)
+            for k, v in DIFFICULTY_LEVEL_LABELS.items()
+        ]
+    )
+    languages: List[str] = Field(default_factory=lambda: list(DEFAULT_COURSE_LANGUAGES))
+    currencies: List[str] = Field(default_factory=lambda: [DEFAULT_CURRENCY_INR])
 
 
 class CourseListResponse(BaseModel):
